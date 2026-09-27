@@ -15,6 +15,8 @@ notes (a 7th chord), each held in tune for a moment. Your password always works 
 Needs Omarchy (with its Quickshell lock screen), PipeWire, a microphone and `gcc`.
 
 ```sh
+git clone https://github.com/edtruitt-cloud/pitchlock
+cd pitchlock
 ./install.sh
 ```
 
