@@ -7,7 +7,17 @@ notes (a 7th chord), each held in tune for a moment. Your password always works 
 - Fits your voice: presets from bass to soprano, or measure your own range
 - Difficulty from Easy to Perfect pitch; optional shuffled note order
 - Chords always fit your range, using an inversion when the plain chord doesn't fit
-- Settings panel on the bar, a practice window, and scores for every voice type × difficulty
+- Chords, melodies (sing back 4–6 notes), or both
+- Scores for every voice type × difficulty, a steadiness score, achievements, and a recording
+  of your fastest unlock for each difficulty
+- A daily challenge (the same chord on every computer, fitted to each voice) with an optional
+  warm-up scale first, on your first unlock of the day
+- Trouble notes (which notes you tend to sing flat or sharp), a day-streak flame on the lock,
+  and a choice of tone sound (organ, piano, soft sine, choir)
+- Practice window with ear training (name the chord or interval)
+- Optional: easier difficulty early and late, a harmony drone (headphones), notes that float
+  up behind the game
+- Settings panel on the bar
 - Colours, font and wallpaper follow your Omarchy theme
 
 ## Install
@@ -60,11 +70,13 @@ You can always type your password and press Enter instead.
 | Section | What |
 |---|---|
 | Voice | Preset (bass … soprano, or **All** for wide-range voices), lowest/highest note, **Measure my voice** |
-| Challenge | Difficulty (Easy, Normal, Hard, Perfect pitch), pitch accuracy, hold time, chord types, how often diminished/augmented/sus4 appear, random note order |
-| Sound | Play the first note when a chord appears, the next note after a match, the chord on unlock, tone volume |
+| Challenge | Chords / melodies / both, difficulty (Easy, Normal, Hard, Perfect pitch), pitch accuracy, hold time, chord types, how often diminished/augmented/sus4 appear, random note order, easier early and late, floating notes |
+| Sound | Play the first note when a chord appears, the next note after a match, harmony drone, pause music while locked, the chord on unlock, tone volume |
 | Microphone | Mic test, noise rejection, how long before the mic sleeps |
 | Unlock | What unlocks it: **singing, password or bypass word**; **singing only**; or **pass-notes (secure)**. Optional bypass word, pass-notes and pass-code setup, show time/accuracy, how long the unlock screen stays |
-| Scores | A grid of voice types × difficulties: typical time (last 10, unusually slow ones left out) and best |
+| Scores | A grid of voice types × difficulties for chords or melodies: typical time (last 10, unusually slow ones left out) and best; steadiness |
+| Achievements | Reachable goals (unlock counts, day streaks, every difficulty and chord family, melodies, steadiness, ear training…) |
+| Best recordings | Your fastest unlock per difficulty as a recording to play back (on this computer only; never in pass-notes mode) |
 
 Buttons: **Practice** opens a practice window with the same settings; **Preview** shows the
 lock screen without locking.

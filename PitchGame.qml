@@ -10,6 +10,7 @@ Item {
   focus: true
 
   signal quitRequested()
+  signal tabRequested()                 // practice window: switch tabs
 
   // ── lock-screen mode ─────────────────────────────────────────────────────
   // In lock mode letter keys go to a typed buffer owned by the host (the lock
@@ -145,7 +146,7 @@ Item {
   // When the voice range or chord options change before any singing has started (e.g.
   // settings finish loading, or edited in the panel with the practice window open),
   // replace the chord on screen so it matches.
-  readonly property string challengeShape: [rangeLow, rangeHigh, randomOrder,
+  readonly property string challengeShape: [rangeLow, rangeHigh, randomOrder, opt("challengeKind", "chord"),
     colourChordChance, JSON.stringify(chordTypesEnabled)].join("|")
   onChallengeShapeChanged: if (!unlocked && stage === 0 && firstVoiceAt === 0) requestNewChallenge()
   // Several things ask for a fresh chord at start-up (built, activated, settings applied);
@@ -156,12 +157,32 @@ Item {
     newChallengePending = true
     Qt.callLater(function() { root.newChallengePending = false; root.newChallenge() })
   }
-  property real colourChordChance: opt("colourChordChance", 0.25) // share that are dim / aug / sus4
+  property real colourChordChance: easeActive ? easeTuning[effectiveDifficulty][2] : opt("colourChordChance", 0.25) // share that are dim / aug / sus4
+
+  // Easier early and late: before the morning hour / from the night hour, Easy (same values
+  // as PitchSettings' Easy) replaces the chosen difficulty.
+  readonly property var easeTuning: ({ easy: [35, 0.4, 0], normal: [26.875, 0.5, 0.25], hard: [15, 0.75, 0.5] })
+  property int hourNow: new Date().getHours()
+  Timer { interval: 60000; running: true; repeat: true; onTriggered: root.hourNow = new Date().getHours() }
+  readonly property bool easeActive: !!opt("easeEnabled", false)
+    && (hourNow < opt("easeMorningUntil", 9) || hourNow >= opt("easeNightFrom", 22))
+  readonly property string effectiveDifficulty: easeActive ? "easy" : opt("difficulty", "normal")
   property var chordTypesEnabled: opt("chordTypesEnabled", ["major", "minor", "dim", "aug", "sus4"])
-  readonly property var intervals: qualities[quality].iv
-  readonly property var toneNames: qualities[quality].names
-  readonly property var toneShort: qualities[quality].short
-  readonly property var toneColors: [pal.root, pal.third, pal.fifth, pal.seventh]
+  // A melody is its own "quality": its notes are the tones, sung in order.
+  readonly property bool isMelody: quality === "melody" || quality === "warmup"
+  readonly property bool isWarmup: quality === "warmup"
+  readonly property bool isDaily: !!challenge.daily
+  readonly property var intervals: isMelody ? notes.map(n => n - notes[0]) : qualities[quality].iv
+  readonly property var toneNames: isMelody ? notes.map((_, i) => "Note " + (i + 1)) : qualities[quality].names
+  readonly property var toneShort: isMelody ? notes.map((_, i) => String(i + 1)) : qualities[quality].short
+  function qualityLabel(q) { return q === "melody" ? "melody" : (qualities[q] ? qualities[q].label : q) }
+  // one colour per tone; longer tunes (melodies, the warm-up) cycle through the four
+  readonly property var toneColors: {
+    const base = [pal.root, pal.third, pal.fifth, pal.seventh]
+    const out = []
+    for (let i = 0; i < Math.max(6, notes.length); i++) out.push(base[i % 4])
+    return out
+  }
   readonly property int toneCount: intervals.length
   // Singing order: chord-tone indices, root first unless random order is on.
   property int stage: 0                 // position in `order`; toneCount = unlocked
@@ -181,8 +202,8 @@ Item {
   // Pass-notes have their own fixed tuning: Normal, or Hard if chosen. Never Easy or
   // Perfect pitch, and the difficulty sliders don't touch it.
   readonly property bool passHard: opt("passNotesDifficulty", "normal") === "hard"
-  property real tolerance: passMode ? (passHard ? 15 : 26.875) : opt("tolerance", 26.875)     // cents either side
-  property real holdNeeded: passMode ? (passHard ? 0.75 : 0.5) : opt("holdSeconds", 0.375)   // seconds of in-tune singing per tone
+  property real tolerance: passMode ? (passHard ? 15 : 26.875) : easeActive ? easeTuning[effectiveDifficulty][0] : opt("tolerance", 26.875)     // cents either side
+  property real holdNeeded: passMode ? (passHard ? 0.75 : 0.5) : easeActive ? easeTuning[effectiveDifficulty][1] : opt("holdSeconds", 0.375)   // seconds of in-tune singing per tone
   // Notes must always be sung in the pocket's own octave (never octave-shifted).
   readonly property bool octaveFree: false
 
@@ -209,7 +230,7 @@ Item {
   property real lastPlayAt: 0
   function play(secs, gain, midis) {
     lastPlayAt = Date.now()
-    const args = [pitchd, "play", secs.toFixed(2), (gain * opt("toneVolume", 1.0)).toFixed(2)]
+    const args = [pitchd, "play", "-t", opt("toneSound", "organ"), secs.toFixed(2), (gain * opt("toneVolume", 1.0)).toFixed(2)]
     Quickshell.execDetached(args.concat(midis.map(m => midiToHz(m).toFixed(2))))
     // Ignore the mic while our own tone is audible so speaker bleed can't pass a stage.
     muteUntil = Math.max(muteUntil, Date.now() + secs * 1000 + 300)
@@ -219,7 +240,20 @@ Item {
   //   Space            → the note to sing now (root, then 3rd, then 5th)
   //   a note matched   → the next note
   //   unlocked         → the finished chord
+  // A melody plays in full (each note in turn) when it appears and on Space.
+  function playMelody() {
+    const noteSecs = 0.55
+    const args = [pitchd, "arp", "-t", opt("toneSound", "organ"), noteSecs.toFixed(2), "0.01", (0.9 * opt("toneVolume", 1.0)).toFixed(2)]
+    Quickshell.execDetached(args.concat(notes.map(m => midiToHz(m).toFixed(2))))
+    lastPlayAt = Date.now()
+    muteUntil = Math.max(muteUntil, Date.now() + noteSecs * notes.length * 1000 + 400)
+  }
+  function playCurrentNote() {
+    if (unlocked || passMode) return
+    play(1.4, 1.0, [notes[tone]])
+  }
   function playTarget() {
+    if (isMelody && !unlocked && !passMode) { heardReference = true; playMelody(); return }
     if (unlocked || passMode) return
     heardReference = true
     play(1.4, 1.0, [notes[tone]])
@@ -231,26 +265,40 @@ Item {
   property int centsN: 0
   property real unlockedAt: 0
   property var lastStats: null
+  property var newAchievements: []      // titles earned by this unlock
+  property bool bestSaved: false        // this unlock was a new best and was recorded
+  // Replay your best: the fastest unlock per kind and difficulty is kept as a recording
+  // (never in pass-notes mode). Setting: saveBest.
+  readonly property string bestDir: Quickshell.env("HOME") + "/.local/state/pitchlock/best"
   property var pastUnlocks: []          // supplied by the lock service (saved history)
   readonly property string statsLine: lastStats
-    ? "unlocked in " + lastStats.secs.toFixed(1) + " s  ·  " + Math.round(lastStats.cents) + "¢ off on average"
+    ? (lastStats.daily ? "daily challenge " : "unlocked ") + "in " + lastStats.secs.toFixed(1) + " s  ·  " + Math.round(lastStats.cents) + "¢ off  ·  " + lastStats.steady + "% steady"
     : ""
   readonly property var difficultyNames: ({ easy: "Easy", normal: "Normal", hard: "Hard", perfect: "Perfect pitch", custom: "Custom" })
   readonly property var voiceNames: ({ bass: "Bass", baritone: "Baritone", tenor: "Tenor", alto: "Alto", mezzo: "Mezzo-soprano", soprano: "Soprano", all: "All", custom: "Custom voice" })
-  function comboName(u) { return (difficultyNames[u.difficulty] || u.difficulty) + " · " + (voiceNames[u.voice] || u.voice) }
+  function comboName(u) { return (difficultyNames[u.difficulty] || u.difficulty) + " · " + (voiceNames[u.voice] || u.voice) + (u.kind === "melody" ? " · melodies" : "") }
   readonly property string historyLine: {
     if (!lastStats) return ""
     // Only compare with unlocks at the same difficulty and voice type.
     const prev = pastUnlocks.filter(u => u.at !== lastStats.at
-      && u.difficulty === lastStats.difficulty && u.voice === lastStats.voice)
+      && u.difficulty === lastStats.difficulty && u.voice === lastStats.voice && (u.kind || "chord") === lastStats.kind)
     if (!prev.length) return "first unlock at " + comboName(lastStats)
     const best = Stats.best(prev)
     const t = Stats.typical(prev.slice(-10))
     return comboName(lastStats) + "  ·  " + (lastStats.secs < best ? "new best!" : "best " + best.toFixed(1) + " s")
       + "  ·  typical " + t.secs.toFixed(1) + " s, " + Math.round(t.cents) + "¢"
+      + (t.steady >= 0 ? ", " + Math.round(t.steady) + "% steady" : "")
   }
 
   function newChallenge() {
+    // First lock of the day (not pass-notes): a warm-up, then the daily challenge.
+    if (lockMode && !passMode && !Stats.unlockedToday(pastUnlocks)) {
+      if (opt("warmUp", true) && !warmedUp) { newWarmup(); return }
+      if (newDaily()) return
+    }
+    // Chords, melodies or both (settings: challengeKind).
+    const kind = opt("challengeKind", "chord")
+    if (kind === "melody" || (kind === "both" && Math.random() < 0.5)) { newMelody(); return }
     const fits = q => rootsFor(q).length > 0
     const on = (chordTypesEnabled && chordTypesEnabled.length ? chordTypesEnabled : ["major", "minor"]).filter(fits)
     const plain = on.filter(t => t === "major" || t === "minor")
@@ -275,11 +323,84 @@ Item {
     stage = 0
     done = ord.map(() => false)
     challenge = { quality: q, order: ord, root: voicing[0], notes: voicing }
+    challengeStarted()
+  }
+
+  // A singable melody: 4–6 notes of mostly small steps, all inside the pocket, starting on a
+  // random note (never the last one's note name).
+  function newMelody() {
+    const len = 4 + Math.floor(Math.random() * 3)
+    const starts = []
+    for (let m = rangeLow; m <= rangeHigh; m++) starts.push(m)
+    const tune = [pickRoot(starts)]
+    const steps = [-4, -3, -2, -2, -1, -1, 1, 1, 2, 2, 3, 4, 5]
+    while (tune.length < len) {
+      const options = steps.map(st => tune[tune.length - 1] + st).filter(m => m >= rangeLow && m <= rangeHigh)
+      tune.push(options[Math.floor(Math.random() * options.length)])
+    }
+    stage = 0
+    done = tune.map(() => false)
+    challenge = { quality: "melody", order: tune.map((_, i) => i), root: tune[0], notes: tune }
+    challengeStarted()
+  }
+
+  // Warm-up: five notes of a major scale up and four back down, in the middle of the pocket.
+  // Untimed; finishing it moves on to the daily challenge instead of unlocking.
+  property bool warmedUp: false
+  function newWarmup() {
+    const start = rangeLow + Math.max(0, Math.floor((rangeHigh - rangeLow - 7) / 2))
+    const tune = [0, 2, 4, 5, 7, 5, 4, 2, 0].map(x => start + x)
+    stage = 0
+    done = tune.map(() => false)
+    challenge = { quality: "warmup", order: tune.map((_, i) => i), root: tune[0], notes: tune }
+    challengeStarted()
+  }
+
+  // Daily challenge: the day's chord type and root note name come from the date (see
+  // pitchstats.js), voiced in this pocket. Returns false if nothing fits (then: a normal one).
+  function newDaily() {
+    const key = Stats.dayKey()
+    const d = Stats.daily(key)
+    if (opt("challengeKind", "chord") === "melody") {
+      let m = rangeLow + ((d.pc - rangeLow) % 12 + 12) % 12
+      const tune = [m]
+      for (let i = 0; i < d.length - 1; i++) {
+        let next = tune[tune.length - 1] + d.steps[i]
+        if (next < rangeLow || next > rangeHigh) next = tune[tune.length - 1] - d.steps[i]
+        tune.push(Math.max(rangeLow, Math.min(rangeHigh, next)))
+      }
+      stage = 0
+      done = tune.map(() => false)
+      challenge = { quality: "melody", order: tune.map((_, i) => i), root: tune[0], notes: tune, daily: key }
+      challengeStarted()
+      return true
+    }
+    for (const q of d.types) {
+      const roots = rootsFor(q).filter(r => pc(r) === d.pc)
+      if (!roots.length) continue
+      const vs = voicings(roots[0], qualities[q].iv)
+      const voicing = vs.find(v => v[0] === Math.min.apply(null, v)) || vs[0]
+      const ord = voicing.map((_, i) => i)
+      stage = 0
+      done = ord.map(() => false)
+      challenge = { quality: q, order: ord, root: voicing[0], notes: voicing, daily: key }
+      challengeStarted()
+      return true
+    }
+    return false
+  }
+
+  function challengeStarted() {
     console.log("pitchlock challenge " + rootMidi + " " + quality + " notes " + notes.join(",") + " order " + order.join(","))
     firstVoiceAt = 0
     centsSum = 0
+    holdCents = []
+    noteSteadiness = []
+    noteCentsList = []
     centsN = 0
     lastStats = null
+    newAchievements = []
+    bestSaved = false
     hold = 0
     unlockTimer.stop()
     // Play the first note once the chord has settled (a new chord can be replaced right
@@ -287,10 +408,26 @@ Item {
     if (active && opt("playFirstNote", true)) firstNoteTimer.restart()
   }
 
+  // Steadiness: the pitch wobble while each note was held.
+  property var holdCents: []
+  property var noteSteadiness: []
+  // Trouble notes: the average signed cents while each note was held (flat < 0 < sharp).
+  property var noteCentsList: []
   function completeStage() {
+    noteSteadiness = noteSteadiness.concat([Stats.steadiness(Stats.stdDev(holdCents.slice(-120)))])
+    if (holdCents.length)
+      noteCentsList = noteCentsList.concat([{ m: notes[tone], c: Math.round(holdCents.reduce((a, v) => a + v, 0) / holdCents.length * 10) / 10 }])
+    holdCents = []
     const d = done.slice(); d[tone] = true; done = d
     hold = 0
     stage++
+    if (unlocked && isWarmup) {
+      // warmed up: straight on to the daily challenge (no score, no unlock)
+      warmedUp = true
+      play(1.0, 0.8, [notes[0], notes[0] + 4, notes[0] + 7])
+      warmupDone.restart()
+      return
+    }
     if (unlocked) {
       if (opt("unlockChord", true)) play(2.8, 1.0, notes)
       unlockedAt = Date.now()
@@ -299,18 +436,37 @@ Item {
           at: new Date().toISOString(),
           secs: (Date.now() - firstVoiceAt) / 1000,
           cents: centsN ? centsSum / centsN : 0,
+          steady: Math.round(noteSteadiness.reduce((a, v) => a + v, 0) / Math.max(1, noteSteadiness.length)),
+          noteCents: noteCentsList,
           root: rootMidi,
           quality: quality,
+          kind: isMelody ? "melody" : "chord",
+          daily: challenge.daily || undefined,
           // scores are kept per difficulty and voice type
-          difficulty: opt("difficulty", "normal"),
+          difficulty: effectiveDifficulty,
           voice: opt("voice", "bass")
         }
+        const before = pastUnlocks.filter(u => u.at !== lastStats.at)
+        const same = before.filter(u => u.difficulty === lastStats.difficulty && (u.kind || "chord") === lastStats.kind)
+        bestSaved = false
+        if (lockMode && !passMode && opt("saveBest", true) && mic.running
+            && (!same.length || lastStats.secs < Stats.best(same))) {
+          const file = bestDir + "/" + lastStats.kind + "-" + lastStats.difficulty + ".wav"
+          Quickshell.execDetached(["mkdir", "-p", bestDir])
+          mic.write("save " + file + " " + Math.min(44, lastStats.secs + 1.5).toFixed(1) + "\n")
+          lastStats.recording = file
+          bestSaved = true
+        }
+        // Achievements can be limited to one voice type (setting: achievementsVoice).
+        const av = opt("achievementsVoice", "")
+        newAchievements = lockMode && (!av || lastStats.voice === av)
+          ? Stats.newlyEarned(Stats.forAchievements(before, av), Stats.forAchievements(before, av).concat([lastStats]), null) : []
         if (lockMode) unlockRecorded(lastStats)
         else pastUnlocks = pastUnlocks.concat([lastStats])
       }
       unlockTimer.restart()
     } else {
-      if (opt("playNextNote", true)) playTarget()
+      if (opt("playNextNote", true)) playCurrentNote()
     }
   }
 
@@ -368,12 +524,13 @@ Item {
       }
     } else {
       if (voiced && !unlocked && firstVoiceAt === 0) firstVoiceAt = Date.now()
-      if (inTune) { centsSum += Math.abs(errCents); centsN++ }
+      if (inTune) { centsSum += Math.abs(errCents); centsN++; holdCents.push(errCents) }
       if (inTune) hold = Math.min(holdNeeded, hold + frameSecs)
       else if (!unlocked) hold = Math.max(0, hold - frameSecs * (voiced ? 0.8 : 0.3))
     }
 
     history.push(voiced ? { m: liveMidi, ok: inTune, e: errCents } : null)
+    if (voiced && frameCount % 9 === 0 && floats.visible) floats.spawn(liveMidi, inTune)
     if (history.length > historyMax) history.shift()
 
     if (!passMode && hold >= holdNeeded && !unlocked) completeStage()
@@ -385,11 +542,23 @@ Item {
   Process {
     id: mic
     running: root.active && !root.micAsleep
+    stdinEnabled: true                  // "save <file> <secs>" keeps a best unlock as a recording
     command: [root.pitchd, "mic", String(root.opt("micSensitivity", 3.0))]
     stdout: SplitParser { onRead: data => root.onFrame(data) }
     // (stopping it for mic sleep isn't a failure)
     onExited: if (root.active && !root.micAsleep) root.micError = true
   }
+
+  // Harmony drone (headphones): while you sing the other notes, the root keeps sounding
+  // quietly underneath, like singing harmony against it. Off by default.
+  Process {
+    running: !!root.opt("harmonyDrone", false) && root.active && !root.micAsleep && !root.passMode
+             && root.quality !== "melody" && !root.unlocked && root.tone > 0
+    command: [root.pitchd, "play", "-t", root.opt("toneSound", "organ") === "piano" ? "organ" : root.opt("toneSound", "organ"),
+              "600", (0.35 * root.opt("toneVolume", 1.0)).toFixed(2), root.midiToHz(root.rootMidi).toFixed(2)]   // a piano can't sustain a drone
+  }
+
+  Timer { id: warmupDone; interval: 1300; onTriggered: root.newChallenge() }
 
   Timer {
     id: firstNoteTimer
@@ -480,6 +649,7 @@ Item {
     return false
   }
 
+  Keys.onTabPressed: e => { if (!lockMode) { tabRequested(); e.accepted = true } }
   Keys.onPressed: e => {
     if (lockMode) {
       wakeRequested()
@@ -535,6 +705,14 @@ Item {
     }
   }
 
+  PitchFloatingNotes {
+    id: floats
+    anchors.fill: parent
+    game: root
+    hideNames: root.passMode
+    visible: !!root.opt("floatingNotes", true)
+  }
+
   ColumnLayout {
     anchors.fill: parent
     anchors.margins: 32
@@ -550,7 +728,8 @@ Item {
         spacing: 4
         Text {
           id: brand
-          text: root.lockMode ? Qt.formatDateTime(clock.now, "dddd  ·  HH:mm") : "PITCHLOCK"
+          text: (root.lockMode ? Qt.formatDateTime(clock.now, "dddd  ·  HH:mm") : "PITCHLOCK")
+            + (root.isWarmup ? "  ·  WARM-UP" : root.isDaily ? "  ·  DAILY CHALLENGE" : "")
           color: root.pal.dim
           font { family: root.pal.font; pixelSize: 13; letterSpacing: 5; weight: Font.DemiBold }
           QtObject { id: clock; property date now: new Date() }
@@ -558,7 +737,10 @@ Item {
         }
         Text {
           text: root.passMode ? "Sing your pass-notes"
+              : root.unlocked && root.isWarmup ? "Warmed up! Now the daily challenge…"
               : root.unlocked ? "Unlocked"
+              : root.isWarmup ? "Warm up: note " + (root.stage + 1) + " of " + root.toneCount
+              : root.isMelody ? "Sing note " + (root.stage + 1) + " of " + root.toneCount
               : root.tone === 0 ? "Match the root"
               : "Sing the " + String(root.toneNames[root.tone] || "note").toLowerCase()
           Layout.fillWidth: true
@@ -570,10 +752,11 @@ Item {
           text: root.passMode ? (root.passCooldown > 0 ? "Too many wrong notes — try again in " + root.passCooldown + " s  ·  or type your pass-code"
                                                      : "From memory  ·  or type your pass-code")
             : root.unlocked
-            ? root.noteNames[root.pc(root.rootMidi)] + " " + root.qualities[root.quality].label + " complete"
+            ? (root.isMelody ? "Melody complete" : root.noteNames[root.pc(root.rootMidi)] + " " + root.qualityLabel(root.quality) + " complete")
             : "Target " + root.noteName(root.displayTarget) + "  ·  "
               + root.midiToHz(root.displayTarget).toFixed(1) + " Hz  ·  hold " + Number(root.holdNeeded.toFixed(3)) + " s"
               + "  ·  space: hear it"
+              + (root.easeActive ? "  ·  " + (root.hourNow < 12 ? "early" : "late") + ": " + root.effectiveDifficulty : "")
           Layout.fillWidth: true
           wrapMode: Text.WordWrap
           color: root.passMode ? root.pal.dim : root.unlocked ? root.pal.good : root.toneColors[Math.max(0, root.tone)]
@@ -587,6 +770,14 @@ Item {
         RowLayout {
           Layout.alignment: Qt.AlignRight
           spacing: 8
+          Text {
+            readonly property int streak: Stats.currentStreak(root.pastUnlocks)
+            visible: root.lockMode && streak >= 2
+            Layout.alignment: Qt.AlignVCenter
+            text: "🔥 " + streak + "-day streak"
+            color: root.pal.warn
+            font { family: root.pal.font; pixelSize: 13; bold: true }
+          }
           PitchBadge {
             text: root.micError ? "mic error" : root.micAsleep ? "mic asleep" : "mic"
             on: !root.micError && !root.micAsleep
@@ -621,7 +812,8 @@ Item {
         Layout.fillHeight: true
         Layout.minimumHeight: 160
         radius: 18
-        color: Qt.rgba(root.pal.panel.r, root.pal.panel.g, root.pal.panel.b, 0.86)
+        // translucent enough for the floating notes behind it to show through
+        color: Qt.rgba(root.pal.panel.r, root.pal.panel.g, root.pal.panel.b, root.opt("floatingNotes", true) ? 0.62 : 0.86)
         border { color: root.pal.grid; width: 1 }
 
         PitchTrace {
@@ -634,8 +826,8 @@ Item {
         Column {
           anchors.centerIn: parent
           spacing: 14
-          opacity: root.unlocked ? 1 : 0
-          scale: root.unlocked ? 1 : 0.85
+          opacity: root.unlocked && !root.isWarmup ? 1 : 0
+          scale: root.unlocked && !root.isWarmup ? 1 : 0.85
           Behavior on opacity { NumberAnimation { duration: 500 } }
           Behavior on scale { NumberAnimation { duration: 700; easing.type: Easing.OutBack } }
 
@@ -651,6 +843,20 @@ Item {
             visible: text.length > 0 && root.opt("showStats", true)
             color: root.pal.text
             font { family: root.pal.font; pixelSize: 20 }
+          }
+          Text {
+            anchors.horizontalCenter: parent.horizontalCenter
+            visible: root.bestSaved && root.opt("showStats", true)
+            text: "🎙  new best — saved a recording (♪ panel → Best recordings)"
+            color: root.pal.good
+            font { family: root.pal.font; pixelSize: 15 }
+          }
+          Text {
+            anchors.horizontalCenter: parent.horizontalCenter
+            visible: root.newAchievements.length > 0
+            text: "🏆  " + root.newAchievements.join("  ·  ")
+            color: root.pal.warn
+            font { family: root.pal.font; pixelSize: 18; weight: Font.Bold }
           }
           Text {
             anchors.horizontalCenter: parent.horizontalCenter

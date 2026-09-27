@@ -18,6 +18,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <stdint.h>
 
 #define RATE 48000
 #define WIN 2048
@@ -86,12 +89,77 @@ static double yin(const float *x, double *clarity) {
   return RATE / t;
 }
 
+// ── Recording the last few seconds (mic mode only) ──────────────────────────
+// The mic audio also goes into a rolling 45 s buffer held in memory. Nothing is written
+// unless the controller sends "save <path> <seconds>\n" on stdin; then the last
+// <seconds> are written as a 16-bit mono WAV (loudness normalised).
+#define RING_SECS 45
+#define RING (RATE * RING_SECS)
+static float *ring = NULL;
+static size_t ring_pos = 0, ring_fill = 0;
+static int commands = 0;              // read stdin commands (mic mode)
+static char cmd[1024];
+static size_t cmd_len = 0;
+
+static void put_le(FILE *f, uint32_t v, int bytes) {
+  for (int i = 0; i < bytes; i++) fputc((v >> (8 * i)) & 0xff, f);
+}
+
+static void save_wav(const char *path, double secs) {
+  size_t n = (size_t)(secs * RATE);
+  if (n > ring_fill) n = ring_fill;
+  if (n == 0) return;
+  size_t start = (ring_pos + RING - n) % RING;
+  float peak = 1e-6f;
+  for (size_t i = 0; i < n; i++) { float v = fabsf(ring[(start + i) % RING]); if (v > peak) peak = v; }
+  float gain = 0.9f / peak;
+  if (gain > 30.0f) gain = 30.0f;
+  char tmp[1100];
+  snprintf(tmp, sizeof tmp, "%s.part", path);
+  FILE *f = fopen(tmp, "wb");
+  if (!f) return;
+  fwrite("RIFF", 1, 4, f); put_le(f, 36 + n * 2, 4); fwrite("WAVEfmt ", 1, 8, f);
+  put_le(f, 16, 4); put_le(f, 1, 2); put_le(f, 1, 2); put_le(f, RATE, 4); put_le(f, RATE * 2, 4);
+  put_le(f, 2, 2); put_le(f, 16, 2); fwrite("data", 1, 4, f); put_le(f, n * 2, 4);
+  for (size_t i = 0; i < n; i++) {
+    float v = ring[(start + i) % RING] * gain;
+    if (v > 1) v = 1; else if (v < -1) v = -1;
+    put_le(f, (uint32_t)(int16_t)(v * 32767), 2);
+  }
+  fclose(f);
+  rename(tmp, path);
+  fprintf(stderr, "pitchd: saved %.1f s\n", (double)n / RATE);
+}
+
+static void poll_commands(void) {
+  char chunk[256];
+  ssize_t got;
+  while ((got = read(0, chunk, sizeof chunk)) > 0) {
+    for (ssize_t i = 0; i < got; i++) {
+      if (chunk[i] == '\n') {
+        cmd[cmd_len] = 0;
+        char path[1000];
+        double secs = 0;
+        if (sscanf(cmd, "save %999s %lf", path, &secs) == 2) save_wav(path, secs);
+        cmd_len = 0;
+      } else if (cmd_len < sizeof cmd - 1) {
+        cmd[cmd_len++] = chunk[i];
+      }
+    }
+  }
+}
+
 static int listen(FILE *in) {
   float hop[HOP];
   size_t filled = 0;
   setvbuf(stdout, NULL, _IOLBF, 0);
 
   while (fread(hop, sizeof(float), HOP, in) == HOP) {
+    if (commands) {
+      for (int i = 0; i < HOP; i++) { ring[ring_pos] = hop[i]; ring_pos = (ring_pos + 1) % RING; }
+      if (ring_fill < RING) ring_fill += HOP;
+      poll_commands();
+    }
     memmove(buf, buf + HOP, (WIN - HOP) * sizeof(float));
     memcpy(buf + WIN - HOP, hop, HOP * sizeof(float));
     if (filled < WIN) { filled += HOP; if (filled < WIN) continue; }
@@ -128,9 +196,38 @@ static int listen(FILE *in) {
   return 0;
 }
 
+// Tone sounds: 0 organ, 1 piano, 2 sine, 3 choir ("-t <name>" after the command).
+static int timbre = 0;
+
+static double voice(double f, double t) {
+  const double p = 2 * M_PI * f * t;
+  switch (timbre) {
+  case 1: {  // piano: struck, then fading; higher overtones fade faster
+    const double a[] = { 1, 0.5, 0.3, 0.18, 0.1 };
+    double s = 0;
+    for (int k = 1; k <= 5; k++) s += a[k - 1] * exp(-t * (1.1 + 0.9 * k)) * sin(k * p);
+    return 1.6 * s;
+  }
+  case 2:    // sine: soft and nearly pure (a little 2nd harmonic keeps bass audible)
+    return 1.4 * (sin(p) + 0.25 * sin(2 * p));
+  case 3: {  // choir "ooh": gentle vibrato, two slightly detuned voices
+    double s = 0;
+    for (int v = 0; v < 2; v++) {
+      const double ff = f * (v ? 1.003 : 1.0);
+      const double q = 2 * M_PI * ff * t - (0.005 * ff / 5.5) * cos(2 * M_PI * 5.5 * t + v);
+      s += sin(q) + 0.45 * sin(2 * q) + 0.22 * sin(3 * q) + 0.12 * sin(4 * q);
+    }
+    return 0.75 * s;
+  }
+  default:   // organ: fundamental plus overtones (laptop speakers barely reproduce bass
+             // fundamentals, but the ear still hears the right pitch from the series)
+    return sin(p) + 0.6 * sin(2 * p) + 0.4 * sin(3 * p) + 0.25 * sin(4 * p) + 0.12 * sin(5 * p);
+  }
+}
+
 static int tone(FILE *out_f, double secs, double gain, int n, double *hz) {
   size_t total = (size_t)(secs * RATE);
-  const double attack = 0.04 * RATE, release = 0.35 * RATE;
+  const double attack = (timbre == 1 ? 0.005 : timbre == 3 ? 0.15 : 0.04) * RATE, release = 0.35 * RATE;
   float out[512];
   size_t i = 0;
   while (i < total) {
@@ -140,12 +237,7 @@ static int tone(FILE *out_f, double secs, double gain, int n, double *hz) {
       if (i < attack) env = i / attack;
       else if (i > total - release) env = (total - i) / release;
       double t = (double)i / RATE, s = 0;
-      for (int v = 0; v < n; v++) {
-        double p = 2 * M_PI * hz[v] * t;
-        // Fundamental plus overtones. Laptop speakers barely reproduce bass notes (C2 is
-        // 65 Hz), but the ear still hears the right pitch from the harmonic series.
-        s += sin(p) + 0.6 * sin(2 * p) + 0.4 * sin(3 * p) + 0.25 * sin(4 * p) + 0.12 * sin(5 * p);
-      }
+      for (int v = 0; v < n; v++) s += voice(hz[v], t);
       out[k] = (float)(gain * 0.17 * env * s / n);
     }
     if (fwrite(out, sizeof(float), k, out_f) != k) return 1;
@@ -161,6 +253,20 @@ static int parse_freqs(int argc, char **argv, int first, double *hz) {
 }
 
 int main(int argc, char **argv) {
+  // optional "-t <organ|piano|sine|choir>" right after the command
+  char *args[64];
+  int nargs = 0;
+  for (int i = 0; i < argc && nargs < 64; i++) {
+    if (i == 2 && i + 1 < argc && strcmp(argv[i], "-t") == 0) {
+      const char *t = argv[++i];
+      timbre = !strcmp(t, "piano") ? 1 : !strcmp(t, "sine") ? 2 : !strcmp(t, "choir") ? 3 : 0;
+      continue;
+    }
+    args[nargs++] = argv[i];
+  }
+  argc = nargs;
+  argv = args;
+
   double hz[16];
   const char *rec = "pw-record -a --rate 48000 --channels 1 --format f32 -";
   const char *cat = "pw-cat -p -a --rate 48000 --channels 1 --format f32 --latency 30ms -";
@@ -173,6 +279,11 @@ int main(int argc, char **argv) {
   if (argc >= 2 && strcmp(argv[1], "mic") == 0) {
     FILE *p = popen(rec, "r");
     if (!p) { perror("pw-record"); return 1; }
+    ring = calloc(RING, sizeof(float));
+    if (ring) {
+      commands = 1;
+      fcntl(0, F_SETFL, fcntl(0, F_GETFL) | O_NONBLOCK);
+    }
     listen(p);
     return pclose(p) == 0 ? 0 : 1;
   }

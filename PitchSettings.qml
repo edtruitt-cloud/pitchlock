@@ -62,6 +62,16 @@ QtObject {
   property alias passCodeLength: data.passCodeLength
   property alias passNotesDifficulty: data.passNotesDifficulty
   property alias pauseMusic: data.pauseMusic
+  property alias easeEnabled: data.easeEnabled
+  property alias easeMorningUntil: data.easeMorningUntil
+  property alias easeNightFrom: data.easeNightFrom
+  property alias harmonyDrone: data.harmonyDrone
+  property alias challengeKind: data.challengeKind
+  property alias floatingNotes: data.floatingNotes
+  property alias saveBest: data.saveBest
+  property alias toneSound: data.toneSound
+  property alias achievementsVoice: data.achievementsVoice
+  property alias warmUp: data.warmUp
   readonly property bool passNotesSet: data.passNotesHash.length > 0
   readonly property bool passCodeSet: data.passCodeHash.length > 0
 
@@ -198,6 +208,16 @@ QtObject {
       property int passCodeLength: 0
       property string passNotesDifficulty: "normal"   // "normal" or "hard" only
       property bool pauseMusic: true         // pause any playing music (and Matrix Rain's) while locked
+      property bool easeEnabled: false       // easier early and late
+      property int easeMorningUntil: 9       // before this hour …
+      property int easeNightFrom: 22         // … and from this hour, the game uses Easy
+      property bool harmonyDrone: false      // root drones under the other notes (headphones)
+      property string challengeKind: "chord" // chord | melody | both
+      property bool floatingNotes: true      // sung notes rise behind the game
+      property bool saveBest: true           // keep the fastest unlock per kind/difficulty as a recording
+      property string toneSound: "organ"     // organ | piano | sine | choir
+      property string achievementsVoice: ""  // count achievements for this voice type only ("" = any)
+      property bool warmUp: true             // a short scale before the first unlock of the day
       property bool showStats: true
       property real unlockPauseSeconds: 3.0
     }
