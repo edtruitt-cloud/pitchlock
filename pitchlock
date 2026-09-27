@@ -1,0 +1,29 @@
+#!/bin/sh
+# Open the pitchlock practice window, floating and centred (Hyprland would otherwise tile it).
+dir="$(dirname "$(readlink -f "$0")")"
+if [ -f "$dir/pitchd.c" ] && ! [ "$dir/pitchd" -nt "$dir/pitchd.c" ]; then
+  gcc -O2 -Wall -o "$dir/pitchd" "$dir/pitchd.c" -lm || exit 1
+fi
+
+# One practice window at a time: close any that's already open.
+pkill -f "^qs -p $dir\$" 2>/dev/null && sleep 0.3
+
+qs -p "$dir" &
+pid=$!
+
+w='title:^pitchlock practice$'
+for _ in $(seq 40); do
+  hyprctl clients -j 2>/dev/null | grep -q '"title": "pitchlock practice"' && break
+  sleep 0.1
+done
+hyprctl dispatch "hl.dsp.window.float({ window = \"$w\", action = \"toggle\" })" >/dev/null 2>&1
+hyprctl dispatch "hl.dsp.window.resize({ window = \"$w\", x = 1220, y = 780 })" >/dev/null 2>&1
+hyprctl dispatch "hl.dsp.window.center({ window = \"$w\" })" >/dev/null 2>&1
+
+# Closing the window doesn't end a Quickshell program, and a practice game left running
+# keeps listening and playing notes in the background. Stop it once the window is gone.
+while kill -0 "$pid" 2>/dev/null; do
+  sleep 1
+  hyprctl clients -j 2>/dev/null | grep -q '"title": "pitchlock practice"' || { kill "$pid" 2>/dev/null; break; }
+done
+wait "$pid" 2>/dev/null

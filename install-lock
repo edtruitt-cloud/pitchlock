@@ -1,0 +1,3 @@
+#!/bin/sh
+# Development shortcut: copy the game files into the installed plugin (no restart).
+exec "$(dirname "$(readlink -f "$0")")/install.sh" --files-only

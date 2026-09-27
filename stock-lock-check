@@ -1,0 +1,18 @@
+#!/bin/bash
+# Omarchy post-update hook for pitchlock.
+# ertiv.lock is a clone of Omarchy's stock lock plugin, so fixes to the stock lock
+# don't reach it. Warn when the stock files differ from the copy the clone was made from.
+# After merging any changes into the clone, refresh the baseline:
+#   cp /usr/share/omarchy/shell/plugins/lock/* ~/.local/share/pitchlock/stock-lock-baseline/
+
+baseline="${PITCHLOCK_BASELINE:-$HOME/.local/share/pitchlock/stock-lock-baseline}"
+stock="${PITCHLOCK_STOCK:-/usr/share/omarchy/shell/plugins/lock}"
+[[ -d $baseline && -d $stock ]] || exit 0
+
+if ! diff -rq "$baseline" "$stock" >/dev/null 2>&1; then
+  changed=$(diff -rq "$baseline" "$stock" 2>/dev/null | wc -l)
+  omarchy-notification-send -u critical -g 󰌾 \
+    "Omarchy's lock screen was updated" \
+    "Your pitchlock lock is a copy of the old version ($changed file(s) differ). Compare: diff -r ~/.local/share/pitchlock/stock-lock-baseline $stock"
+fi
+exit 0
