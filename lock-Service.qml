@@ -3,6 +3,7 @@ import Quickshell
 import Quickshell.Io
 import Quickshell.Services.Pam
 import Quickshell.Hyprland
+import Quickshell.Services.Mpris
 import Quickshell.Wayland
 import qs.Commons
 
@@ -52,16 +53,77 @@ Item {
   // Secret bypass: typing this word anywhere on the lock screen unlocks it (blank = off).
   readonly property string bypassWord: String(pitchSettings.bypassWord || "").toLowerCase()
 
+  // "Singing only" mode: only the chord unlocks: no password, bypass word or fingerprint.
+  // Safety net: if the microphone stops working, the password comes back.
+  property bool pitchMicFailed: false
+  readonly property bool singingOnly: pitchSettings.unlockMode === "singing" && !pitchMicFailed
+
+  // "Pass-notes" (secure) mode: a memorised 4-note sequence, or a typed pass-code, unlocks;
+  // the bypass word is off; the account password + Enter still works as a backup.
+  // Checked here only, against salted hashes; nothing sung or typed is logged.
+  readonly property bool passMode: pitchSettings.unlockMode === "passnotes"
+  property var passHeard: []           // the last notes held on the lock (cleared on unlock)
+
+  // A sung note only counts if it's the right next pass-note; wrong notes are ignored
+  // (progress is kept). 15 s without a right note starts over.
+  //
+  // Guessing guard: after 20 clearly wrong notes, notes are ignored for a minute. A note one
+  // semitone from the right one isn't counted as wrong (voices flicker between neighbours).
+  readonly property int passWrongLimit: 20
+  property int passWrong: 0
+  property real passCooldownUntil: 0
+  property int passCooldownLeft: 0     // seconds, shown on the lock
+  function passNoteSung(midi) {
+    if (!lockRequested || !passMode) return
+    if (Date.now() < passCooldownUntil) return
+    if (!pitchSettings.passNoteFits(passHeard, midi)) {
+      const nearMiss = pitchSettings.passNoteFits(passHeard, midi - 1) || pitchSettings.passNoteFits(passHeard, midi + 1)
+      if (!nearMiss && ++passWrong >= passWrongLimit) {
+        passWrong = 0
+        passHeard = []
+        passCooldownUntil = Date.now() + 60000
+        passCooldownLeft = 60
+        passCooldownTimer.start()
+        logEvent("pass-notes: too many wrong notes, pausing for a minute")
+      }
+      return
+    }
+    passHeard = passHeard.concat([midi])     // the lock's game dings this note when it sees it
+    passResetTimer.restart()
+    if (passHeard.length === 4) {
+      passResetTimer.stop()
+      passWrong = 0
+      logEvent("unlock: pass-notes")
+      // Let the game ding the last note before the lock closes.
+      Qt.callLater(function() { root.passHeard = []; root.finishUnlock() })
+    }
+  }
+  Timer { id: passResetTimer; interval: 15000; onTriggered: root.passHeard = [] }
+  Timer {
+    id: passCooldownTimer
+    interval: 250
+    repeat: true
+    onTriggered: {
+      root.passCooldownLeft = Math.max(0, Math.ceil((root.passCooldownUntil - Date.now()) / 1000))
+      if (root.passCooldownLeft === 0) stop()
+    }
+  }
+
   function isBypass(text) {
-    return bypassWord.length > 0 && String(text || "").toLowerCase().endsWith(bypassWord)
+    return !passMode && bypassWord.length > 0 && String(text || "").toLowerCase().endsWith(bypassWord)
   }
 
 
   function handleTyped(text) {
+    if (singingOnly) { enteredPassword = ""; return }
+    text = String(text || "").slice(-128)
     enteredPassword = text
     if (text.length > 0 && failureMessage.length > 0) failureMessage = ""
     if (lockRequested && isBypass(text)) {
       logEvent("unlock: bypass word")
+      finishUnlock()
+    } else if (lockRequested && passMode && pitchSettings.passCodeEndsStream(text)) {
+      logEvent("unlock: pass-code")
       finishUnlock()
     }
   }
@@ -95,6 +157,45 @@ Item {
 
   function recordPitchUnlock(stats) {
     pitchState.unlocks = (pitchState.unlocks || []).concat([stats]).slice(-500)
+  }
+
+  // Matrix Rain's music (its synth) would drown out singing, so it's stopped while locked
+  // and started again on unlock, but only if it was playing. Uses Matrix Rain's own IPC;
+  // does nothing when that plugin isn't installed.
+  // Any other music (Spotify, a browser, …) is paused the same way, through MPRIS.
+  // Setting: pauseMusic (on by default).
+  property bool rainMusicPaused: false
+  property var pausedPlayers: []
+  function pauseRainMusic() {
+    if (pitchSettings.pauseMusic === false) return
+    if (!rainMusicCheck.running) rainMusicCheck.running = true
+    const playing = (Mpris.players ? Mpris.players.values : []).filter(p => p && p.isPlaying && p.canPause)
+    playing.forEach(p => p.pause())
+    pausedPlayers = playing
+    if (playing.length) logEvent("paused " + playing.length + " music player(s)")
+  }
+  function resumeRainMusic() {
+    const players = pausedPlayers
+    pausedPlayers = []
+    players.forEach(p => { if (p && p.canPlay) p.play() })
+    if (!rainMusicPaused) return
+    rainMusicPaused = false
+    Quickshell.execDetached(["omarchy-shell", "matrix-rain", "technoPlay"])
+    logEvent("matrix rain music resumed")
+  }
+  Process {
+    id: rainMusicCheck
+    command: ["bash", "-c", "f=\"$HOME/.local/state/ertiv.matrix-rain/state.json\"; [ -f \"$f\" ] && jq -e '.technoOn == true' \"$f\" >/dev/null 2>&1 && omarchy-shell matrix-rain technoStop >/dev/null 2>&1 && echo stopped"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        if (String(text || "").trim() !== "stopped") return
+        // Unlocked before the check finished: put the music straight back.
+        if (!root.lockRequested) { Quickshell.execDetached(["omarchy-shell", "matrix-rain", "technoPlay"]); return }
+        root.rainMusicPaused = true
+        root.logEvent("matrix rain music paused")
+      }
+    }
   }
 
   function pitchUnlock() {
@@ -202,6 +303,10 @@ Item {
 
     resetAuthenticationState()
     primaryScreenName = Hyprland.focusedMonitor ? Hyprland.focusedMonitor.name : ""
+    pitchMicFailed = false
+    pauseRainMusic()
+    passHeard = []
+    passWrong = 0
     lockRequested = true
     armBlankTimer()
     logEvent("lock-requested")
@@ -217,6 +322,7 @@ Item {
 
   function finishUnlock() {
     if (!root.locked && !lockRequested) return
+    resumeRainMusic()
 
     lockRequested = false
     pendingSessionLock = false
@@ -244,6 +350,7 @@ Item {
   }
 
   function submitPassword(value) {
+    if (singingOnly) return
     var password = String(value || "")
     if (!lockRequested || authenticatingPassword || password.length === 0) return
 
@@ -278,6 +385,7 @@ Item {
 
   function startFingerprint() {
     if (!lockRequested || !sessionLock.secure || !fingerprintConfigured) return
+    if (singingOnly) return
     if (fingerprintPam.active || fingerprintAuthenticating) return
 
     fingerprintAuthenticating = true
@@ -321,6 +429,7 @@ Item {
         pendingSessionLockTimer.stop()
       }
 
+      if (!locked) root.resumeRainMusic()
       if (!locked && root.lockRequested) {
         root.lockRequested = false
         root.pendingSessionLock = false
@@ -383,6 +492,15 @@ Item {
           onTypedTextEdited: function(text) { root.handleTyped(text) }
           onSubmitPassword: function(text) { root.submitPassword(text) }
           onUnlockRequested: root.pitchUnlock()
+          singingOnly: root.singingOnly
+          passMode: root.passMode
+          passProgress: root.passHeard.length
+          passCooldown: root.passCooldownLeft
+          onNoteSung: function(midi) { root.passNoteSung(midi) }
+          onMicErrorChanged: {
+            root.pitchMicFailed = micError
+            if (micError) root.logEvent("pitch: microphone failed" + (root.pitchSettings.unlockMode === "singing" ? ", password re-enabled" : ""))
+          }
           onWakeRequested: root.runWake()
         }
       }
@@ -399,7 +517,7 @@ Item {
         failedAttempts: root.failedAttempts
         // Hidden on the pitch screen: it must not hold keyboard focus there, or keys
         // (space, shortcuts) land in its invisible password field instead of the game.
-        inputEnabled: root.lockRequested && (!lockSurface.pitchScreen || lockSurface.pitchFocusFailed)
+        inputEnabled: root.lockRequested && !root.singingOnly && (!lockSurface.pitchScreen || lockSurface.pitchFocusFailed)
         loadBackground: root.locked
         passwordText: root.enteredPassword
         onPasswordTextEdited: function(password) { root.handleTyped(password) }

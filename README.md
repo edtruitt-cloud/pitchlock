@@ -63,7 +63,7 @@ You can always type your password and press Enter instead.
 | Challenge | Difficulty (Easy, Normal, Hard, Perfect pitch), pitch accuracy, hold time, chord types, how often diminished/augmented/sus4 appear, random note order |
 | Sound | Play the first note when a chord appears, the next note after a match, the chord on unlock, tone volume |
 | Microphone | Mic test, noise rejection, how long before the mic sleeps |
-| Unlock | Optional bypass word, show time/accuracy, how long the unlock screen stays |
+| Unlock | What unlocks it: **singing, password or bypass word**; **singing only**; or **pass-notes (secure)**. Optional bypass word, pass-notes and pass-code setup, show time/accuracy, how long the unlock screen stays |
 | Scores | A grid of voice types × difficulties: typical time (last 10, unusually slow ones left out) and best |
 
 Buttons: **Practice** opens a practice window with the same settings; **Preview** shows the
@@ -75,6 +75,19 @@ Settings live in `~/.config/pitchlock/settings.json` and apply to the lock immed
 
 - **Security:** pitchlock is a fun lock, not a strong one. Anyone who can sing the chord gets in,
   and so can someone who knows your bypass word if you set one. Your password is unaffected.
+- **Pass-notes (secure)** is for when you need a real lock: four exact notes you memorise (set
+  in the panel, then stored only as a salted hash and never shown again), or a typed pass-code
+  that unlocks the moment you finish typing it, no Enter. The lock never plays or shows the notes;
+  a wrong note is ignored and a right one fills a dot with a short ding of that note (so someone
+  could find them by trying notes one at a time; after 20 clearly wrong notes it stops listening
+  for a minute, and notes a semitone off don't count as wrong). Your account password + Enter always works as a backup. Someone who hears you
+  sing them could learn your pass-notes.
+- **Singing only** turns off the password, bypass word and fingerprint on the lock. It isn't more
+  secure (anyone who can sing the chord gets in), and a sore throat or a loud room can lock you
+  out. If the microphone stops working (won't start, stops sending audio, or is muted) the
+  password comes back automatically.
+- **Music** that's playing (any player, and Matrix Rain's synth) pauses while the screen is
+  locked and carries on when you unlock (setting: *Pause music while locked*).
 - **The mic** only listens while the screen is locked, stops after a minute without sound
   (any key wakes it), and nothing is recorded or sent anywhere.
 - **Loud rooms:** singing or music nearby that happens to hit the notes can count. Raise

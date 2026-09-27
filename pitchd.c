@@ -123,7 +123,7 @@ static int listen(FILE *in) {
 
     double hz = 0, clarity = 0;
     if (rms > gate) hz = yin(buf, &clarity);
-    printf("%.2f %.3f %.4f\n", hz, clarity, rms);
+    printf("%.2f %.3f %.6f\n", hz, clarity, rms);
   }
   return 0;
 }

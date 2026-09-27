@@ -19,11 +19,32 @@ Item {
   property string typedText: ""
   property string failureMessage: ""
   property bool authenticating: false
+  property bool singingOnly: false      // lock in "Singing only" mode: typing does nothing
   property bool heardReference: !lockMode
   signal typedTextEdited(string text)
   signal submitPassword(string text)
   signal unlockRequested()
   signal unlockRecorded(var stats)      // {at, secs, cents, root, quality}; the lock service saves it
+
+  // Pass-notes (secure) mode: no chord, no targets, no tones, nothing that says whether a
+  // note was right. Each exact note held in tune for the hold time is reported (noteSung)
+  // and the lock service checks the last four. Repeating a note needs a break in between.
+  property bool passMode: false
+  signal noteSung(int midi)
+  property int passNote: -1
+  property real passHeldFor: 0
+  property bool passCounted: false
+  property int passDots: 0              // notes heard since the last pause (shown as plain dots)
+  property int passProgress: -1         // from the lock: right notes so far (-1 = not provided)
+  property int passCooldown: 0          // from the lock: seconds of guessing cooldown left
+  property int lastSung: 0
+  property int lastProgress: 0
+  // A right pass-note gets a short ding of that same pitch.
+  onPassProgressChanged: {
+    if (passMode && passProgress > lastProgress && lastSung > 0) play(0.35, 0.8, [lastSung])
+    lastProgress = passProgress
+  }
+  property int passQuiet: 0
   signal wakeRequested()
   property real lastActivity: 0
 
@@ -43,7 +64,7 @@ Item {
   property real lastEngaged: Date.now()
   function engage() {
     lastEngaged = Date.now()
-    if (micAsleep) { micAsleep = false; micError = false; firstVoiceAt = 0 }  // back: restart the clock
+    if (micAsleep) { micAsleep = false; micError = false; firstVoiceAt = 0; micWatchFrom = Date.now() }  // back: restart the clock
   }
 
   readonly property var noteNames: ["C", "C♯", "D", "E♭", "E", "F", "F♯", "G", "A♭", "A", "B♭", "B"]
@@ -150,12 +171,18 @@ Item {
   readonly property int targetMidi: notes[Math.max(0, tone)] !== undefined ? notes[Math.max(0, tone)] : rootMidi
   // Whole chord is shifted by octaves to meet the singer's register.
   property int octaveShift: 0
-  readonly property real displayTarget: targetMidi + 12 * octaveShift
+  // In pass-notes mode the "target" is just the nearest note to what you're singing.
+  readonly property real displayTarget: passMode
+    ? (voiced ? Math.round(liveMidi) : (rangeLow + rangeHigh) / 2)
+    : targetMidi + 12 * octaveShift
   function chordMidi(i) { return (notes[i] !== undefined ? notes[i] : rootMidi) + 12 * octaveShift }
 
   // ── settings ─────────────────────────────────────────────────────────────
-  property real tolerance: opt("tolerance", 26.875)     // cents either side
-  property real holdNeeded: opt("holdSeconds", 0.375)   // seconds of in-tune singing per tone
+  // Pass-notes have their own fixed tuning: Normal, or Hard if chosen. Never Easy or
+  // Perfect pitch, and the difficulty sliders don't touch it.
+  readonly property bool passHard: opt("passNotesDifficulty", "normal") === "hard"
+  property real tolerance: passMode ? (passHard ? 15 : 26.875) : opt("tolerance", 26.875)     // cents either side
+  property real holdNeeded: passMode ? (passHard ? 0.75 : 0.5) : opt("holdSeconds", 0.375)   // seconds of in-tune singing per tone
   // Notes must always be sung in the pocket's own octave (never octave-shifted).
   readonly property bool octaveFree: false
 
@@ -193,7 +220,7 @@ Item {
   //   a note matched   → the next note
   //   unlocked         → the finished chord
   function playTarget() {
-    if (unlocked) return
+    if (unlocked || passMode) return
     heardReference = true
     play(1.4, 1.0, [notes[tone]])
   }
@@ -248,7 +275,7 @@ Item {
     stage = 0
     done = ord.map(() => false)
     challenge = { quality: q, order: ord, root: voicing[0], notes: voicing }
-    console.log("pitchlock challenge " + rootMidi + " " + quality)
+    console.log("pitchlock challenge " + rootMidi + " " + quality + " notes " + notes.join(",") + " order " + order.join(","))
     firstVoiceAt = 0
     centsSum = 0
     centsN = 0
@@ -292,6 +319,9 @@ Item {
     if (p.length < 3) return
     const hz = +p[0], clarity = +p[1], rms = +p[2]
     muted = Date.now() < muteUntil
+    lastFrameAt = Date.now()
+    if (+p[2] > 0) lastSoundAt = lastFrameAt
+    if (micError && lastSoundAt === lastFrameAt) micError = false   // the mic came back
     level = level * 0.75 + Math.min(1, Math.sqrt(rms) * 3) * 0.25
 
     if (hz > 0 && clarity > 0.75 && !muted) {
@@ -315,15 +345,38 @@ Item {
     else if (voiced && !unlocked && Math.abs(liveMidi - displayTarget) > 7)
       octaveShift = Math.round((liveMidi - targetMidi) / 12)
 
-    if (voiced && !unlocked && firstVoiceAt === 0) firstVoiceAt = Date.now()
-    if (inTune) { centsSum += Math.abs(errCents); centsN++ }
-    if (inTune) hold = Math.min(holdNeeded, hold + frameSecs)
-    else if (!unlocked) hold = Math.max(0, hold - frameSecs * (voiced ? 0.8 : 0.3))
+    if (passMode) {
+      hold = 0
+      if (voiced) {
+        passQuiet = 0
+        const n = Math.round(liveMidi)
+        if (Math.abs(errCents) <= tolerance) {
+          if (n !== passNote) { passNote = n; passHeldFor = 0; passCounted = false }
+          passHeldFor += frameSecs
+          if (!passCounted && passHeldFor >= holdNeeded) {
+            passCounted = true
+            passDots = Math.min(4, passDots + 1)
+            lastSung = n
+            noteSung(n)
+          }
+        } else if (n !== passNote) {
+          passNote = -1; passHeldFor = 0; passCounted = false
+        }
+      } else if (++passQuiet > 8) {
+        passNote = -1; passHeldFor = 0; passCounted = false
+        if (passQuiet > 5 / frameSecs) passDots = 0     // a 5 s pause starts over
+      }
+    } else {
+      if (voiced && !unlocked && firstVoiceAt === 0) firstVoiceAt = Date.now()
+      if (inTune) { centsSum += Math.abs(errCents); centsN++ }
+      if (inTune) hold = Math.min(holdNeeded, hold + frameSecs)
+      else if (!unlocked) hold = Math.max(0, hold - frameSecs * (voiced ? 0.8 : 0.3))
+    }
 
     history.push(voiced ? { m: liveMidi, ok: inTune, e: errCents } : null)
     if (history.length > historyMax) history.shift()
 
-    if (hold >= holdNeeded && !unlocked) completeStage()
+    if (!passMode && hold >= holdNeeded && !unlocked) completeStage()
     frameCount++
     trace.requestPaint()
     ring.requestPaint()
@@ -334,7 +387,8 @@ Item {
     running: root.active && !root.micAsleep
     command: [root.pitchd, "mic", String(root.opt("micSensitivity", 3.0))]
     stdout: SplitParser { onRead: data => root.onFrame(data) }
-    onExited: if (root.active) root.micError = true
+    // (stopping it for mic sleep isn't a failure)
+    onExited: if (root.active && !root.micAsleep) root.micError = true
   }
 
   Timer {
@@ -354,7 +408,24 @@ Item {
     requestNewChallenge()
     if (lockMode) forceActiveFocus()
   }
-  onActiveChanged: if (active) { engage(); micError = false; requestNewChallenge(); forceActiveFocus() }
+  onActiveChanged: if (active) { engage(); micError = false; micWatchFrom = Date.now(); requestNewChallenge(); forceActiveFocus() }
+
+  // Microphone watchdog. "Singing only" relies on the mic, so a mic that never starts,
+  // stops sending audio, or sends pure digital silence (muted/dead) counts as failed,
+  // which brings the password back. A real room is never exactly silent.
+  property real micWatchFrom: Date.now()
+  property real lastFrameAt: 0
+  property real lastSoundAt: 0
+  Timer {
+    running: root.lockMode && root.active && !root.micAsleep
+    interval: 1000
+    repeat: true
+    onTriggered: {
+      const now = Date.now()
+      const since = t => now - Math.max(t, root.micWatchFrom)
+      if (since(root.lastFrameAt) > 3000 || since(root.lastSoundAt) > 5000) root.micError = true
+    }
+  }
 
   Timer {
     running: root.lockMode && root.active && !root.micAsleep
@@ -383,6 +454,10 @@ Item {
   }
 
   function lockKey(e) {
+    if (singingOnly) {
+      if (e.key === Qt.Key_Space) { playTarget(); return true }
+      return false
+    }
     const ctrl = e.modifiers & Qt.ControlModifier
     if (ctrl) {
       switch (e.key) {
@@ -482,7 +557,8 @@ Item {
           Timer { running: root.lockMode; repeat: true; interval: 10000; triggeredOnStart: true; onTriggered: clock.now = new Date() }
         }
         Text {
-          text: root.unlocked ? "Unlocked"
+          text: root.passMode ? "Sing your pass-notes"
+              : root.unlocked ? "Unlocked"
               : root.tone === 0 ? "Match the root"
               : "Sing the " + String(root.toneNames[root.tone] || "note").toLowerCase()
           Layout.fillWidth: true
@@ -491,14 +567,16 @@ Item {
           font { family: root.pal.font; pixelSize: root.wide ? 34 : 24; weight: Font.Bold }
         }
         Text {
-          text: root.unlocked
+          text: root.passMode ? (root.passCooldown > 0 ? "Too many wrong notes — try again in " + root.passCooldown + " s  ·  or type your pass-code"
+                                                     : "From memory  ·  or type your pass-code")
+            : root.unlocked
             ? root.noteNames[root.pc(root.rootMidi)] + " " + root.qualities[root.quality].label + " complete"
             : "Target " + root.noteName(root.displayTarget) + "  ·  "
               + root.midiToHz(root.displayTarget).toFixed(1) + " Hz  ·  hold " + Number(root.holdNeeded.toFixed(3)) + " s"
               + "  ·  space: hear it"
           Layout.fillWidth: true
           wrapMode: Text.WordWrap
-          color: root.unlocked ? root.pal.good : root.toneColors[Math.max(0, root.tone)]
+          color: root.passMode ? root.pal.dim : root.unlocked ? root.pal.good : root.toneColors[Math.max(0, root.tone)]
           font { family: root.pal.font; pixelSize: root.wide ? 16 : 13 }
         }
       }
@@ -613,8 +691,28 @@ Item {
       }
     }
 
+    // pass-notes mode: one plain dot per note heard (never shows which were right)
+    Row {
+      visible: root.passMode
+      Layout.alignment: Qt.AlignHCenter
+      Layout.preferredHeight: 64
+      spacing: 22
+      Repeater {
+        model: 4
+        Rectangle {
+          required property int index
+          anchors.verticalCenter: parent.verticalCenter
+          width: 22; height: 22; radius: 11
+          color: index < (root.passProgress >= 0 ? root.passProgress : root.passDots) ? root.pal.text : "transparent"
+          border { width: 2; color: root.pal.dim }
+          Behavior on color { ColorAnimation { duration: 120 } }
+        }
+      }
+    }
+
     // stage chips
     RowLayout {
+      visible: !root.passMode
       Layout.fillWidth: true
       spacing: 14
       Repeater {
@@ -648,6 +746,9 @@ Item {
             : root.typedText.length > 0 ? "●".repeat(Math.min(root.typedText.length, 32))
             : root.failureMessage.length > 0 ? root.failureMessage
             : root.micAsleep ? "mic asleep  ·  press any key to wake it"
+            : root.singingOnly ? "singing only  ·  sing the chord to unlock"
+            : root.passMode ? "type your pass-code  ·  or your password + Enter"
+            : root.micError ? "microphone unavailable  ·  type your password"
             : "sing to unlock  ·  or type your password"
         color: root.failureMessage.length > 0 && root.typedText.length === 0 ? root.pal.bad
              : root.typedText.length > 0 || root.authenticating ? root.pal.text : root.pal.dim
@@ -661,7 +762,7 @@ Item {
       horizontalAlignment: Text.AlignHCenter
       wrapMode: Text.WordWrap
       text: root.lockMode
-        ? "space  hear the note to sing"
+        ? (root.passMode ? "sing your four pass-notes, or type your pass-code" : "space  hear the note to sing")
         : "space  hear the note to sing     esc  quit"
       color: root.pal.dim
       font { family: root.pal.font; pixelSize: 12; letterSpacing: 1 }

@@ -47,7 +47,7 @@ Canvas {
     }
 
     // chord lanes
-    for (let i = 0; i < g.toneCount; i++) {
+    for (let i = 0; i < (g.passMode ? 0 : g.toneCount); i++) {   // no chord lanes in pass-notes mode
       const cm = g.chordMidi(i), col = g.toneColors[i], yy = y(cm)
       const current = i === g.tone
       if (current) {

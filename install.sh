@@ -45,7 +45,7 @@ build_pitchd() {
 
 # Copy the game into the plugin, with the plugin id set for this user.
 copy_files() {
-  cp "$src"/Pitch*.qml "$src/pitchstats.js" "$src/shell.qml" "$src/pitchlock" "$dst/"
+  cp "$src"/Pitch*.qml "$src/pitchstats.js" "$src/pitchcrypto.js" "$src/shell.qml" "$src/pitchlock" "$dst/"
   cp "$src/lock-Service.qml" "$dst/Service.qml"
   sed -i "s/ertiv\.lock/$id/g" "$dst/Service.qml" "$dst/PitchBarWidget.qml"
   # The detector may be running (the lock's mic), so swap it in by rename.

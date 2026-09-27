@@ -29,7 +29,8 @@ Canvas {
     ctx.beginPath(); ctx.arc(cx, cy, inner, 0, Math.PI * 2); ctx.stroke()
 
     // ticks + labels
-    const tones = g.intervals.map((_, i) => i)
+    // pass-notes mode shows only your own pitch: no chord notes on the wheel
+    const tones = g.passMode ? [] : g.intervals.map((_, i) => i)
     const chordPcs = tones.map(i => g.pc(g.rootMidi + g.intervals[i]))
     ctx.font = "13px '" + pal.font + "'"
     ctx.textAlign = "center"; ctx.textBaseline = "middle"
@@ -55,7 +56,7 @@ Canvas {
     }
 
     // unlock moment: ripples roll out of each chord note, and a ring bursts from the centre
-    if (g.unlocked && g.unlockedAt > 0) {
+    if (!g.passMode && g.unlocked && g.unlockedAt > 0) {
       const t = (Date.now() - g.unlockedAt) / 1000
       if (t < 1.4) {
         const burst = ctx.createRadialGradient(cx, cy, 0, cx, cy, R * (0.3 + t))
@@ -96,7 +97,7 @@ Canvas {
     }
 
     // chord nodes on the rim
-    for (let i = 0; i < g.toneCount; i++) {
+    for (let i = 0; i < tones.length; i++) {
       const q = pt(chordPcs[i], R), col = g.toneColors[i]
       if (g.done[i]) {
         const halo = ctx.createRadialGradient(q[0], q[1], 0, q[0], q[1], 26)

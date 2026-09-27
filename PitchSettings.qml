@@ -1,6 +1,7 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import "pitchcrypto.js" as Crypto
 
 // Every tunable setting, stored in ~/.config/pitchlock/settings.json. The lock service,
 // the practice window and the settings panel all share this; edits apply live.
@@ -30,8 +31,8 @@ QtObject {
 
   // Difficulty presets set accuracy, hold time and how often colour chords appear.
   readonly property var difficulties: [
-    { value: "easy", label: "Easy", tolerance: 40, holdSeconds: 0.3, colourChordChance: 0 },
-    { value: "normal", label: "Normal", tolerance: 26.875, holdSeconds: 0.375, colourChordChance: 0.25 },
+    { value: "easy", label: "Easy", tolerance: 35, holdSeconds: 0.4, colourChordChance: 0 },
+    { value: "normal", label: "Normal", tolerance: 26.875, holdSeconds: 0.5, colourChordChance: 0.25 },
     { value: "hard", label: "Hard", tolerance: 15, holdSeconds: 0.75, colourChordChance: 0.5 },
     { value: "perfect", label: "Perfect pitch", tolerance: 10, holdSeconds: 1.5, colourChordChance: 1.0 },
     { value: "custom", label: "Custom" }
@@ -53,6 +54,51 @@ QtObject {
   property alias micSleepSeconds: data.micSleepSeconds
   property alias micSensitivity: data.micSensitivity
   property alias bypassWord: data.bypassWord
+  property alias unlockMode: data.unlockMode
+  property alias passNotesHash: data.passNotesHash
+  property alias passNotesSalt: data.passNotesSalt
+  property alias passCodeHash: data.passCodeHash
+  property alias passCodeSalt: data.passCodeSalt
+  property alias passCodeLength: data.passCodeLength
+  property alias passNotesDifficulty: data.passNotesDifficulty
+  property alias pauseMusic: data.pauseMusic
+  readonly property bool passNotesSet: data.passNotesHash.length > 0
+  readonly property bool passCodeSet: data.passCodeHash.length > 0
+
+  // Save secrets only as salted fingerprints (pitchcrypto.js); they can't be read back.
+  // Besides the full sequence, each step (first note, first two, first three) gets its own
+  // fingerprint, so the lock can accept a sung note only if it's the right next one.
+  function setPassNotes(midis) {
+    const salt = Crypto.newSalt()
+    data.passNotesSalt = salt
+    data.passNotesSteps = [1, 2, 3].map(n => Crypto.hashSecret("step:" + Crypto.notesSecret(midis.slice(0, n)), salt))
+    data.passNotesHash = Crypto.hashSecret(Crypto.notesSecret(midis), salt)
+  }
+  // Is `midi` the right next pass-note after the ones already accepted?
+  function passNoteFits(accepted, midi) {
+    if (!passNotesSet) return false
+    const seq = accepted.concat([midi])
+    if (seq.length === 4) return passNotesMatch(seq)
+    const steps = data.passNotesSteps || []
+    return steps.length === 3 && seq.length < 4
+      && Crypto.hashSecret("step:" + Crypto.notesSecret(seq), data.passNotesSalt) === steps[seq.length - 1]
+  }
+  function setPassCode(code) {
+    if (!code) { data.passCodeHash = ""; data.passCodeSalt = ""; data.passCodeLength = 0; return }
+    const salt = Crypto.newSalt()
+    data.passCodeSalt = salt
+    data.passCodeLength = code.length
+    data.passCodeHash = Crypto.hashSecret(code, salt)
+  }
+  function passNotesMatch(midis) {
+    return passNotesSet && Crypto.hashSecret(Crypto.notesSecret(midis), data.passNotesSalt) === data.passNotesHash
+  }
+  // The typed stream ends with the pass-code (anything typed before it is ignored).
+  function passCodeEndsStream(stream) {
+    const n = data.passCodeLength
+    return passCodeSet && n > 0 && stream.length >= n
+      && Crypto.hashSecret(stream.slice(-n), data.passCodeSalt) === data.passCodeHash
+  }
   property alias showStats: data.showStats
   property alias unlockPauseSeconds: data.unlockPauseSeconds
 
@@ -93,11 +139,11 @@ QtObject {
   // Defaults are the tuning pitchlock was built around (a bass).
   readonly property var defaults: ({
     voice: "bass", pocketLow: 46, pocketHigh: 58,
-    difficulty: "normal", tolerance: 26.875, holdSeconds: 0.375, randomOrder: false,
+    difficulty: "normal", tolerance: 26.875, holdSeconds: 0.5, randomOrder: false,
     chordTypesEnabled: ["major", "minor", "dim", "aug", "sus4"], colourChordChance: 0.25,
     toneVolume: 1.0, playFirstNote: true, playNextNote: true, unlockChord: true,
     micSleepSeconds: 60, micSensitivity: 3.0,
-    bypassWord: "", showStats: true, unlockPauseSeconds: 3.0
+    bypassWord: "", unlockMode: "fun", showStats: true, unlockPauseSeconds: 3.0
   })
 
   // Saving: changes made together (a preset sets several values) are written as one save
@@ -131,7 +177,7 @@ QtObject {
       property int pocketLow: 46
       property int pocketHigh: 58
       property real tolerance: 26.875
-      property real holdSeconds: 0.375
+      property real holdSeconds: 0.5
       property string difficulty: "normal"
       property bool randomOrder: false       // sing the chord tones in a shuffled order
       property var chordTypesEnabled: ["major", "minor", "dim", "aug", "sus4"]
@@ -143,6 +189,15 @@ QtObject {
       property real micSleepSeconds: 60
       property real micSensitivity: 3.0      // voice must be this many times the room noise
       property string bypassWord: ""         // empty = no bypass word
+      property string unlockMode: "fun"      // "fun" | "singing" (singing only) | "passnotes" (secure)
+      property string passNotesHash: ""
+      property string passNotesSalt: ""
+      property var passNotesSteps: []        // fingerprints of the first 1, 2 and 3 notes
+      property string passCodeHash: ""
+      property string passCodeSalt: ""
+      property int passCodeLength: 0
+      property string passNotesDifficulty: "normal"   // "normal" or "hard" only
+      property bool pauseMusic: true         // pause any playing music (and Matrix Rain's) while locked
       property bool showStats: true
       property real unlockPauseSeconds: 3.0
     }

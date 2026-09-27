@@ -7,9 +7,10 @@ import qs.Commons
 import qs.Ui
 import "pitchstats.js" as Stats
 
-// Pitchlock settings. Every control writes straight to ~/.config/pitchlock/settings.json,
-// which the lock watches and applies live. The panel never talks to the lock service
-// itself: Omarchy keeps authentication services unreachable from other plugin code.
+// Pitchlock settings, styled after the Matrix Rain plugin's panel. Every control writes
+// straight to ~/.config/pitchlock/settings.json, which the lock watches and applies live.
+// The panel never talks to the lock service itself: Omarchy keeps authentication services
+// unreachable from other plugin code.
 Rectangle {
   id: panel
 
@@ -19,10 +20,29 @@ Rectangle {
   PitchSettings { id: localSettings }
   readonly property var s: localSettings
   readonly property color fg: bar ? bar.foreground : Color.foreground
-  readonly property color dim: Qt.rgba(fg.r, fg.g, fg.b, 0.6)
+  readonly property color dim: Qt.rgba(fg.r, fg.g, fg.b, 0.65)
+  readonly property color accent: bar && bar.accent ? bar.accent : Color.accent
+  readonly property string fontFamily: bar && bar.fontFamily ? bar.fontFamily : Style.font.family
+  function luminance(c) {
+    function linear(v) { return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4) }
+    return 0.2126 * linear(c.r) + 0.7152 * linear(c.g) + 0.0722 * linear(c.b)
+  }
+  readonly property color onAccent: luminance(accent) > 0.179 ? "#000000" : "#ffffff"
+  function tint(a) { return Qt.rgba(fg.r, fg.g, fg.b, a) }
+
   readonly property var noteNames: ["C", "C♯", "D", "E♭", "E", "F", "F♯", "G", "A♭", "A", "B♭", "B"]
   function noteName(m) { const r = Math.round(m); return noteNames[((r % 12) + 12) % 12] + (Math.floor(r / 12) - 1) }
+  // Scrolling never changes a setting: wheels over controls scroll the panel instead.
+  function scrollBy(wheel) {
+    const max = Math.max(0, scroll.contentHeight - scroll.height)
+    scroll.contentY = Math.max(0, Math.min(max, scroll.contentY - wheel.angleDelta.y / 120 * Style.space(60)))
+    wheel.accepted = true
+  }
   function filePath(name) { return decodeURIComponent(String(Qt.resolvedUrl(name)).replace(/^file:\/\//, "")) }
+  function playMidis(midis) {
+    const hz = midis.map(m => (440 * Math.pow(2, (m - 69) / 12)).toFixed(2))
+    Quickshell.execDetached([filePath("pitchd"), "arp", "0.7", "0.05", "0.9"].concat(hz))
+  }
 
   // Unlock history, read from the lock's state file (the lock watches it, so a reset sticks).
   FileView {
@@ -105,77 +125,172 @@ Rectangle {
     }
   }
 
-  color: Color.popups.background
-  implicitWidth: Style.space(560)
-  implicitHeight: Style.space(760)
+  property var pickNotes: [s.pocketLow, s.pocketLow + 4, s.pocketLow + 7, s.pocketLow + 2]
 
-  // ── building blocks ──────────────────────────────────────────────────────
+  color: Color.popups.background
+  implicitWidth: Style.space(960)
+  implicitHeight: Style.space(720)
+
+  // ── building blocks (after Matrix Rain's panel) ─────────────────────────
   component Label: Text {
     color: panel.fg
-    font.family: Style.font.family
+    font.family: panel.fontFamily
     font.pixelSize: Style.font.body
+    textFormat: Text.PlainText
   }
   component Hint: Text {
     color: panel.dim
-    font.family: Style.font.family
+    font.family: panel.fontFamily
     font.pixelSize: Style.font.caption
+    textFormat: Text.PlainText
     wrapMode: Text.WordWrap
     Layout.fillWidth: true
   }
-  component Section: PanelSectionHeader {
-    foreground: panel.fg
+  // "Title  ·  value" in bold, "(what it does)" underneath.
+  component FieldLabel: ColumnLayout {
+    property string title
+    property string value: ""
+    property string hint: ""
     Layout.fillWidth: true
-    Layout.topMargin: Style.space(10)
+    spacing: 2
+    Label {
+      Layout.fillWidth: true
+      wrapMode: Text.WordWrap
+      text: parent.title + (parent.value !== "" ? "  ·  " + parent.value : "")
+      font.bold: true
+    }
+    Label {
+      Layout.fillWidth: true
+      visible: parent.hint.length > 0
+      wrapMode: Text.WordWrap
+      text: "(" + parent.hint + ")"
+      opacity: 0.8
+    }
   }
-  component SettingSlider: ColumnLayout {
-    id: ss
-    property string label
+  component Section: Label {
+    Layout.fillWidth: true
+    color: panel.accent
+    font.bold: true
+    font.letterSpacing: 1.5
+  }
+  // A card holding one section.
+  component Card: Rectangle {
+    default property alias content: cardCol.data
+    property bool highlighted: false
+    Layout.fillWidth: true
+    implicitHeight: cardCol.implicitHeight + Style.space(24)
+    radius: 8
+    color: panel.tint(0.05)
+    border.width: 1
+    border.color: highlighted ? panel.accent : panel.tint(0.18)
+    ColumnLayout {
+      id: cardCol
+      anchors { left: parent.left; right: parent.right; top: parent.top; margins: Style.space(12) }
+      spacing: Style.space(8)
+    }
+  }
+  // Pill button; the selected one fills with the accent colour.
+  component Chip: Rectangle {
+    id: chip
+    property string text: ""
+    property bool selected: false
+    property bool small: false
+    signal clicked()
+    implicitWidth: chipCaption.implicitWidth + (small ? 16 : 22)
+    implicitHeight: small ? 26 : 32
+    radius: 6
+    opacity: enabled ? 1 : 0.4
+    color: selected ? panel.accent : panel.tint(chipHit.containsMouse ? 0.18 : 0.08)
+    border.color: selected ? panel.accent : panel.tint(0.18)
+    Label {
+      id: chipCaption
+      anchors.centerIn: parent
+      text: chip.text
+      color: chip.selected ? panel.onAccent : panel.fg
+      font.bold: true
+      font.pixelSize: chip.small ? Style.font.caption : Style.font.body
+    }
+    Accessible.role: Accessible.Button
+    Accessible.name: text
+    Accessible.onPressAction: clicked()
+    MouseArea {
+      id: chipHit
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onClicked: chip.clicked()
+      onWheel: wheel => panel.scrollBy(wheel)
+    }
+  }
+  // Round dial: drag up/down to turn it. The wheel scrolls the panel instead.
+  component Knob: Column {
+    id: knob
+    property string title
     property string valueText
     property real value
-    property real from
-    property real to
+    property real from: 0
+    property real to: 1
     property real step: 0.01
     signal changed(real value)
-    Layout.fillWidth: true
-    spacing: Style.space(4)
-    RowLayout {
-      Layout.fillWidth: true
-      Label { text: ss.label; Layout.fillWidth: true }
-      Label { text: ss.valueText; color: Color.accent }
+    readonly property real frac: Math.max(0, Math.min(1, (value - from) / (to - from)))
+    width: 96
+    spacing: 5
+    Rectangle {
+      width: 62; height: 62
+      anchors.horizontalCenter: parent.horizontalCenter
+      radius: 31
+      color: Color.popups.background
+      border.color: panel.accent
+      border.width: 2
+      Rectangle {
+        anchors.centerIn: parent
+        width: 4; height: 50
+        color: "transparent"
+        rotation: -135 + knob.frac * 270
+        Rectangle { anchors.top: parent.top; width: 4; height: 13; radius: 2; color: panel.accent }
+      }
+      Label { anchors.centerIn: parent; text: knob.valueText; font.pixelSize: 11 }
+      MouseArea {
+        anchors.fill: parent
+        cursorShape: Qt.SizeVerCursor
+        property real startY
+        property real startFrac
+        onPressed: mouse => { startY = mouse.y; startFrac = knob.frac }
+        onPositionChanged: mouse => {
+          if (!pressed) return
+          const f = Math.max(0, Math.min(1, startFrac + (startY - mouse.y) / 140))
+          const v = knob.from + f * (knob.to - knob.from)
+          knob.changed(Number((Math.round(v / knob.step) * knob.step).toFixed(3)))
+        }
+        onWheel: wheel => panel.scrollBy(wheel)
+      }
     }
-    PanelSlider {
-      Layout.fillWidth: true
-      implicitHeight: Style.space(22)
-      bar: panel.bar
-      minimum: ss.from
-      maximum: ss.to
-      step: ss.step
-      value: ss.value
-      // snap to the step so settings.json holds 0.5, not 0.5039…
-      function snap(v) { return Number((Math.round(v / ss.step) * ss.step).toFixed(3)) }
-      onMoved: v => ss.changed(snap(v))
-      onReleased: v => ss.changed(snap(v))
-    }
+    Label { anchors.horizontalCenter: parent.horizontalCenter; text: knob.title; font.bold: true; font.pixelSize: 12 }
   }
   component NoteStepper: RowLayout {
     id: ns
     property string label
     property int value
+    property bool playable: false
     signal stepped(int delta)
+    signal play()
     Layout.fillWidth: true
     Label { text: ns.label; Layout.fillWidth: true }
-    Button { text: "−"; bordered: true; foreground: panel.fg; onClicked: ns.stepped(-1) }
+    Chip { text: "−"; small: true; onClicked: ns.stepped(-1) }
     Label {
       text: panel.noteName(ns.value)
-      color: Color.accent
+      color: panel.accent
+      font.bold: true
       horizontalAlignment: Text.AlignHCenter
       Layout.preferredWidth: Style.space(52)
     }
-    Button { text: "+"; bordered: true; foreground: panel.fg; onClicked: ns.stepped(1) }
+    Chip { text: "+"; small: true; onClicked: ns.stepped(1) }
+    Chip { visible: ns.playable; text: "▶"; small: true; onClicked: ns.play() }
   }
   component SettingToggle: Toggle {
     Layout.fillWidth: true
     foreground: panel.fg
+    accent: panel.accent
   }
 
   // ── content ──────────────────────────────────────────────────────────────
@@ -183,391 +298,496 @@ Rectangle {
     id: scroll
     anchors.fill: parent
     anchors.margins: Style.space(16)
-    contentHeight: col.implicitHeight
+    contentHeight: page.implicitHeight
     clip: true
     boundsBehavior: Flickable.StopAtBounds
     Controls.ScrollBar.vertical: Controls.ScrollBar {}
 
     ColumnLayout {
-      id: col
+      id: page
       width: scroll.width - Style.space(12)
-      spacing: Style.space(8)
+      spacing: Style.space(14)
 
+      // Title bar
       RowLayout {
         Layout.fillWidth: true
-        ColumnLayout {
-          Layout.fillWidth: true
-          spacing: 2
-          Text {
-            text: "Pitchlock"
-            color: panel.fg
-            font.family: Style.font.family
-            font.pixelSize: Style.font.heading
-            font.bold: true
-          }
-          Hint { text: "Sing the chord to unlock. Changes apply to the lock right away." }
-        }
-        Button {
-          text: "Practice"
-          bordered: true
-          foreground: panel.fg
-          tooltipText: "Open a practice window with these settings (nothing is locked)"
-          onClicked: { Quickshell.execDetached([panel.filePath("pitchlock")]); panel.closeRequested() }
-        }
-        Button {
-          text: "Preview"
-          bordered: true
-          foreground: panel.fg
-          tooltipText: "Show the lock screen without locking (type the bypass word or right-click to close)"
-          onClicked: { Quickshell.execDetached(["omarchy-shell", "lock", "preview"]); panel.closeRequested() }
-        }
-      }
-
-      // ── Voice ──
-      Section { text: "VOICE" }
-      Dropdown {
-        Layout.fillWidth: true
-        label: "Voice type"
-        value: panel.s.voice
-        options: panel.s.presets
-        onChanged: v => panel.s.applyPreset(v)
-      }
-      NoteStepper {
-        label: "Lowest note"
-        value: panel.s.pocketLow
-        onStepped: d => panel.s.setPocket(panel.s.pocketLow + d, panel.s.pocketHigh)
-      }
-      NoteStepper {
-        label: "Highest note"
-        value: panel.s.pocketHigh
-        onStepped: d => panel.s.setPocket(panel.s.pocketLow, panel.s.pocketHigh + d)
-      }
-      Hint {
-        text: "Every note of every chord stays between " + panel.noteName(panel.s.pocketLow) + " and "
-          + panel.noteName(panel.s.pocketHigh) + ", sung in that octave. Pick where your voice is strongest, not your full range."
-      }
-
-      // Measure my voice
-      Rectangle {
-        Layout.fillWidth: true
-        implicitHeight: wizCol.implicitHeight + Style.space(20)
-        radius: Style.cornerRadius
-        color: Qt.rgba(panel.fg.r, panel.fg.g, panel.fg.b, 0.05)
-        border.color: Qt.rgba(panel.fg.r, panel.fg.g, panel.fg.b, 0.15)
-
-        ColumnLayout {
-          id: wizCol
-          anchors { left: parent.left; right: parent.right; top: parent.top; margins: Style.space(10) }
-          spacing: Style.space(6)
-
-          RowLayout {
-            Layout.fillWidth: true
-            Label { text: "Measure my voice"; font.bold: true; Layout.fillWidth: true }
-            Button {
-              visible: wizard.step !== 0
-              text: "Cancel"
-              foreground: panel.fg
-              onClicked: { recordTimer.stop(); wizard.step = 0; wizard.message = "" }
-            }
-          }
-          Hint {
-            text: wizard.step === 0 ? "Sing your lowest and highest comfortable notes; the chords go in the middle of your range."
-              : wizard.step === 1 ? "Sing your LOWEST comfortable note and hold it…  " + Math.ceil(wizard.secsLeft) + " s"
-              : wizard.step === 2 ? "Lowest: " + panel.noteName(wizard.low) + ". Now your HIGHEST comfortable note."
-              : wizard.step === 3 ? "Sing your HIGHEST comfortable note and hold it…  " + Math.ceil(wizard.secsLeft) + " s"
-              : "Your range: " + panel.noteName(wizard.low) + " – " + panel.noteName(wizard.high)
-                + ".  Chords will use " + panel.noteName(wizard.pocket[0]) + " – " + panel.noteName(wizard.pocket[1]) + "."
-          }
-          Text {
-            visible: wizard.message.length > 0
-            text: wizard.message
-            color: Color.urgent
-            font.family: Style.font.family
-            font.pixelSize: Style.font.caption
-            wrapMode: Text.WordWrap
-            Layout.fillWidth: true
-          }
-          Label {
-            visible: wizard.step === 1 || wizard.step === 3
-            text: panel.micHeard ? "hearing " + panel.noteName(panel.micMidi) : "listening…"
-            color: panel.micHeard ? Color.accent : panel.dim
-          }
-          RowLayout {
-            Button {
-              visible: wizard.step === 0 || wizard.step === 2
-              text: wizard.step === 0 ? "Start: lowest note" : "Record highest note"
-              bordered: true
-              foreground: panel.fg
-              onClicked: wizard.start(wizard.step === 0 ? 1 : 3)
-            }
-            Button {
-              visible: wizard.step === 4
-              readonly property bool ok: wizard.pocket[1] - wizard.pocket[0] >= panel.s.minPocketSpan
-              text: ok ? "Use this range" : "Range too small — try again"
-              enabled: ok
-              bordered: true
-              foreground: panel.fg
-              onClicked: { panel.s.setPocket(wizard.pocket[0], wizard.pocket[1]); wizard.step = 0 }
-            }
-            Button {
-              visible: wizard.step === 4
-              text: "Again"
-              foreground: panel.fg
-              onClicked: wizard.step = 0
-            }
-          }
-        }
-      }
-
-      // ── Challenge ──
-      Section { text: "CHALLENGE" }
-      Label { text: "Difficulty" }
-      Flow {
-        Layout.fillWidth: true
-        spacing: Style.space(6)
-        Repeater {
-          model: panel.s.difficulties
-          Button {
-            required property var modelData
-            visible: modelData.value !== "custom" || panel.s.difficulty === "custom"
-            text: modelData.label
-            bordered: true
-            selected: panel.s.difficulty === modelData.value
-            foreground: panel.fg
-            onClicked: panel.s.applyDifficulty(modelData.value)
-          }
-        }
-      }
-      SettingSlider {
-        label: "Pitch accuracy"
-        valueText: "±" + panel.s.tolerance.toFixed(1) + "¢"
-        from: 10; to: 50; step: 0.5
-        value: panel.s.tolerance
-        onChanged: v => panel.s.setTuning("tolerance", v)
-      }
-      Hint { text: "How close to the note counts as in tune. 100¢ is a semitone; smaller is stricter." }
-      SettingSlider {
-        label: "Hold each note"
-        valueText: panel.s.holdSeconds.toFixed(2) + " s"
-        from: 0.2; to: 1.5; step: 0.05
-        value: panel.s.holdSeconds
-        onChanged: v => panel.s.setTuning("holdSeconds", v)
-      }
-      Label { text: "Chord types" }
-      Flow {
-        Layout.fillWidth: true
-        spacing: Style.space(6)
-        Repeater {
-          model: panel.s.chordTypes
-          Button {
-            required property var modelData
-            text: modelData.label
-            bordered: true
-            selected: panel.s.chordTypeOn(modelData.value)
-            foreground: panel.fg
-            onClicked: panel.s.setChordType(modelData.value, !panel.s.chordTypeOn(modelData.value))
-          }
-        }
-      }
-      SettingSlider {
-        label: "How often diminished / augmented / sus4"
-        valueText: Math.round(panel.s.colourChordChance * 100) + "%"
-        from: 0; to: 1; step: 0.05
-        value: panel.s.colourChordChance
-        onChanged: v => panel.s.setTuning("colourChordChance", v)
-      }
-      Hint { text: "Every chord has four notes (a 7th chord), voiced in whichever inversion fits your range." }
-      SettingToggle {
-        label: "Random note order"
-        description: "Sing the chord's notes in a shuffled order instead of always root first."
-        checked: panel.s.randomOrder
-        onClicked: panel.s.randomOrder = !panel.s.randomOrder
-      }
-
-      // ── Sound ──
-      Section { text: "SOUND" }
-      Hint { text: "Space always plays the note to sing. Nothing else plays unless switched on here." }
-      SettingToggle {
-        label: "Play the first note when a chord appears"
-        description: "Including the moment the screen locks — turn off for quiet places."
-        checked: panel.s.playFirstNote
-        onClicked: panel.s.playFirstNote = !panel.s.playFirstNote
-      }
-      SettingToggle {
-        label: "Play the next note after a match"
-        checked: panel.s.playNextNote
-        onClicked: panel.s.playNextNote = !panel.s.playNextNote
-      }
-      SettingToggle {
-        label: "Play the chord on unlock"
-        checked: panel.s.unlockChord
-        onClicked: panel.s.unlockChord = !panel.s.unlockChord
-      }
-      SettingSlider {
-        label: "Tone volume"
-        valueText: Math.round(panel.s.toneVolume * 100) + "%"
-        from: 0.1; to: 1.5; step: 0.05
-        value: panel.s.toneVolume
-        onChanged: v => panel.s.toneVolume = v
-      }
-
-      // ── Microphone ──
-      Section { text: "MICROPHONE" }
-      SettingToggle {
-        label: "Test microphone"
-        description: "Sing a note: it should show up below. If it doesn't, lower noise rejection."
-        checked: panel.micTestOn
-        onClicked: panel.micTestOn = !panel.micTestOn
-      }
-      RowLayout {
-        visible: panel.micTestOn
-        Layout.fillWidth: true
-        spacing: Style.space(10)
-        Rectangle {
-          Layout.fillWidth: true
-          implicitHeight: Style.space(8)
-          radius: height / 2
-          color: Qt.rgba(panel.fg.r, panel.fg.g, panel.fg.b, 0.12)
-          Rectangle {
-            width: parent.width * panel.micLevel
-            height: parent.height
-            radius: parent.radius
-            color: panel.micHeard ? Color.accent : panel.dim
-          }
-        }
+        spacing: Style.space(8)
         Label {
-          Layout.preferredWidth: Style.space(160)
-          horizontalAlignment: Text.AlignRight
-          text: panel.micHeard
-            ? panel.noteName(panel.micMidi) + "  " + (440 * Math.pow(2, (panel.micMidi - 69) / 12)).toFixed(1) + " Hz"
-            : "not hearing a note"
-          color: panel.micHeard ? Color.accent : panel.dim
+          text: "PITCHLOCK / SING TO UNLOCK"
+          font.pixelSize: Style.font.heading
+          font.bold: true
+          font.letterSpacing: 1
+          Layout.fillWidth: true
         }
+        Chip { text: "▶ Practice"; onClicked: { Quickshell.execDetached([panel.filePath("pitchlock")]); panel.closeRequested() } }
+        Chip { text: "Preview lock"; onClicked: { Quickshell.execDetached(["omarchy-shell", "lock", "preview"]); panel.closeRequested() } }
       }
-      SettingSlider {
-        label: "Noise rejection"
-        valueText: panel.s.micSensitivity.toFixed(1) + "×"
-        from: 1.5; to: 8; step: 0.5
-        value: panel.s.micSensitivity
-        onChanged: v => panel.s.micSensitivity = v
-      }
-      Hint { text: "How much louder than the room your voice must be. Lower hears quiet voices; higher ignores more noise. Turn the mic test off and on to try a new value." }
-      SettingSlider {
-        label: "Mic sleeps after"
-        valueText: Math.round(panel.s.micSleepSeconds) + " s"
-        from: 15; to: 300; step: 5
-        value: panel.s.micSleepSeconds
-        onChanged: v => panel.s.micSleepSeconds = v
-      }
-
-      // ── Unlock ──
-      Section { text: "UNLOCK" }
-      Label { text: "Bypass word" }
-      TextField {
-        Layout.fillWidth: true
-        password: true
-        echoMode: TextInput.Password
-        placeholderText: "none — only singing or your password"
-        text: panel.s.bypassWord
-        onEditingFinished: panel.s.bypassWord = text.trim().toLowerCase()
-      }
-      Hint { text: "Typing this anywhere on the lock screen unlocks it. Leave blank to turn it off. Your password always works." }
-      SettingToggle {
-        label: "Show time and accuracy on unlock"
-        checked: panel.s.showStats
-        onClicked: panel.s.showStats = !panel.s.showStats
-      }
-      SettingSlider {
-        label: "Unlock screen stays for"
-        valueText: panel.s.unlockPauseSeconds.toFixed(1) + " s"
-        from: 0.5; to: 6; step: 0.5
-        value: panel.s.unlockPauseSeconds
-        onChanged: v => panel.s.unlockPauseSeconds = v
-      }
-
-      // ── Scores: one per voice type and difficulty ──
-      Section { text: "SCORES" }
-      Hint { text: "Typical unlock time for each voice type and difficulty (your last 10 there, leaving out unusually slow ones), with the best underneath. Yours right now is highlighted." }
-      GridLayout {
-        id: scoreGrid
-        Layout.fillWidth: true
-        columns: panel.s.difficulties.length + 1
-        columnSpacing: Style.space(4)
-        rowSpacing: Style.space(4)
-        readonly property var voices: panel.s.presets
-        readonly property var diffs: panel.s.difficulties
-        readonly property var cells: {
-          const out = [{ kind: "corner" }]
-          for (const d of diffs) out.push({ kind: "head", text: d.label === "Perfect pitch" ? "Perfect" : d.label })
-          for (const v of voices) {
-            out.push({ kind: "voice", text: v.value === "mezzo" ? "Mezzo" : v.value === "all" ? "All" : v.label })
-            for (const d of diffs) {
-              const list = Stats.forCombo(pitchState.unlocks, d.value, v.value)
-              const t = Stats.typical(list.slice(-10))
-              out.push({ kind: "score", count: list.length, typical: t.secs, best: Stats.best(list),
-                         current: panel.s.voice === v.value && panel.s.difficulty === d.value })
-            }
-          }
-          return out
-        }
-        Repeater {
-          model: scoreGrid.cells
-          Rectangle {
-            required property var modelData
-            Layout.fillWidth: true
-            Layout.preferredWidth: modelData.kind === "voice" || modelData.kind === "corner" ? Style.space(70) : Style.space(60)
-            implicitHeight: modelData.kind === "score" ? Style.space(34) : Style.space(20)
-            radius: Style.space(4)
-            color: modelData.kind !== "score" ? "transparent"
-              : modelData.current ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.18)
-              : Qt.rgba(panel.fg.r, panel.fg.g, panel.fg.b, modelData.count ? 0.07 : 0.03)
-            border.width: modelData.kind === "score" && modelData.current ? 1 : 0
-            border.color: Color.accent
-            Column {
-              anchors.centerIn: parent
-              Text {
-                anchors.horizontalCenter: parent.horizontalCenter
-                text: modelData.kind === "score" ? (modelData.count ? modelData.typical.toFixed(1) + " s" : "—") : (modelData.text || "")
-                color: modelData.kind === "head" || modelData.kind === "voice" ? panel.dim : panel.fg
-                font.family: Style.font.family
-                font.pixelSize: Style.font.caption
-                font.bold: modelData.kind === "score" && modelData.count > 0
-              }
-              Text {
-                anchors.horizontalCenter: parent.horizontalCenter
-                visible: modelData.kind === "score" && modelData.count > 0
-                text: visible ? "best " + modelData.best.toFixed(1) : ""
-                color: panel.dim
-                font.family: Style.font.family
-                font.pixelSize: Math.round(Style.font.caption * 0.85)
-              }
-            }
-          }
-        }
-      }
-      Hint {
-        readonly property int untagged: (pitchState.unlocks || []).filter(u => !u.difficulty).length
-        visible: untagged > 0
-        text: untagged + " earlier unlock" + (untagged > 1 ? "s were" : " was") + " recorded before scores were split by difficulty and voice, so " + (untagged > 1 ? "they aren't" : "it isn't") + " shown here."
-      }
+      Hint { text: "Changes apply to the lock right away." }
 
       RowLayout {
         Layout.fillWidth: true
-        Layout.topMargin: Style.space(12)
-        Button {
-          text: "Reset scores"
-          bordered: true
-          foreground: panel.fg
-          enabled: (pitchState.unlocks || []).length > 0
-          onClicked: pitchState.unlocks = []
+        spacing: Style.space(14)
+
+        // ════ left column: voice, unlock ════
+        ColumnLayout {
+          Layout.fillWidth: true
+          Layout.preferredWidth: 1
+          Layout.alignment: Qt.AlignTop
+          spacing: Style.space(14)
+
+          Card {
+            Section { text: "VOICE" }
+            Flow {
+              Layout.fillWidth: true
+              spacing: Style.space(6)
+              Repeater {
+                model: panel.s.presets
+                Chip {
+                  required property var modelData
+                  visible: modelData.value !== "custom" || panel.s.voice === "custom"
+                  text: modelData.value === "all" ? "All" : modelData.label
+                  selected: panel.s.voice === modelData.value
+                  onClicked: panel.s.applyPreset(modelData.value)
+                }
+              }
+            }
+            NoteStepper {
+              label: "Lowest note"
+              value: panel.s.pocketLow
+              onStepped: d => panel.s.setPocket(panel.s.pocketLow + d, panel.s.pocketHigh)
+            }
+            NoteStepper {
+              label: "Highest note"
+              value: panel.s.pocketHigh
+              onStepped: d => panel.s.setPocket(panel.s.pocketLow, panel.s.pocketHigh + d)
+            }
+            Hint {
+              text: "Every note stays between " + panel.noteName(panel.s.pocketLow) + " and " + panel.noteName(panel.s.pocketHigh)
+                + ", sung in that octave. Pick where your voice is strongest, not your full range."
+            }
+          }
+
+          Card {
+            highlighted: wizard.step !== 0
+            RowLayout {
+              Layout.fillWidth: true
+              Section { text: "MEASURE MY VOICE" }
+              Chip {
+                visible: wizard.step !== 0
+                text: "Cancel"
+                small: true
+                onClicked: { recordTimer.stop(); wizard.step = 0; wizard.message = "" }
+              }
+            }
+            Hint {
+              text: wizard.step === 0 ? "Sing your lowest and highest comfortable notes; the chords go in the middle of your range."
+                : wizard.step === 1 ? "Sing your LOWEST comfortable note and hold it…  " + Math.ceil(wizard.secsLeft) + " s"
+                : wizard.step === 2 ? "Lowest: " + panel.noteName(wizard.low) + ". Now your HIGHEST comfortable note."
+                : wizard.step === 3 ? "Sing your HIGHEST comfortable note and hold it…  " + Math.ceil(wizard.secsLeft) + " s"
+                : "Your range: " + panel.noteName(wizard.low) + " – " + panel.noteName(wizard.high)
+                  + ".  Chords will use " + panel.noteName(wizard.pocket[0]) + " – " + panel.noteName(wizard.pocket[1]) + "."
+            }
+            Hint { visible: wizard.message.length > 0; text: wizard.message; color: Color.urgent }
+            Label {
+              visible: wizard.step === 1 || wizard.step === 3
+              text: panel.micHeard ? "hearing " + panel.noteName(panel.micMidi) : "listening…"
+              color: panel.micHeard ? panel.accent : panel.dim
+            }
+            RowLayout {
+              Chip {
+                visible: wizard.step === 0 || wizard.step === 2
+                text: wizard.step === 0 ? "● Start: lowest note" : "● Record highest note"
+                onClicked: wizard.start(wizard.step === 0 ? 1 : 3)
+              }
+              Chip {
+                visible: wizard.step === 4
+                readonly property bool ok: wizard.pocket[1] - wizard.pocket[0] >= panel.s.minPocketSpan
+                enabled: ok
+                selected: ok
+                text: ok ? "Use this range" : "Range too small — try again"
+                onClicked: { panel.s.setPocket(wizard.pocket[0], wizard.pocket[1]); wizard.step = 0 }
+              }
+              Chip { visible: wizard.step === 4; text: "Again"; onClicked: wizard.step = 0 }
+            }
+          }
+
+          Card {
+            Section { text: "UNLOCK" }
+            FieldLabel { title: "What unlocks it" }
+            Flow {
+              Layout.fillWidth: true
+              spacing: Style.space(6)
+              Repeater {
+                model: [{ value: "fun", label: "Singing, password or word" }, { value: "singing", label: "Singing only" },
+                        { value: "passnotes", label: "Pass-notes (secure)" }]
+                Chip {
+                  required property var modelData
+                  text: modelData.label
+                  selected: panel.s.unlockMode === modelData.value
+                  onClicked: panel.s.unlockMode = modelData.value
+                }
+              }
+            }
+            Hint {
+              text: panel.s.unlockMode === "singing"
+                ? "Only singing the chord unlocks: no password, bypass word or fingerprint. If the microphone stops working, the password comes back. A sore throat or a loud room won't — you'd be locked out until you can sing it. And anyone who can sing the chord gets in."
+                : panel.s.unlockMode === "passnotes"
+                ? "Sing your four memorised pass-notes (exact notes, in order), or type your pass-code — no Enter needed, and anything typed before it is ignored. The lock never plays or shows the notes; a wrong note is simply ignored and a right one fills a dot — which also means someone could find them by trying notes one at a time. Your account password + Enter always works too."
+                : "Sing the chord, or type your password (or the bypass word, if you set one)."
+            }
+
+            // Pass-notes setup
+            ColumnLayout {
+              visible: panel.s.unlockMode === "passnotes"
+              Layout.fillWidth: true
+              spacing: Style.space(8)
+              RowLayout {
+                Layout.fillWidth: true
+                Label { text: "Pass-notes"; font.bold: true; Layout.fillWidth: true }
+                Label { text: panel.s.passNotesSet ? "set ✓" : "not set"; color: panel.s.passNotesSet ? panel.accent : Color.urgent; font.bold: true }
+              }
+              Hint { text: "Pick four exact notes you can sing. Listen, learn them, then save. After saving they're stored scrambled and can't be shown or played again — memorise them." }
+              Repeater {
+                model: 4
+                NoteStepper {
+                  required property int index
+                  label: "Note " + (index + 1)
+                  value: panel.pickNotes[index]
+                  playable: true
+                  onStepped: d => { const n = panel.pickNotes.slice(); n[index] = Math.max(28, Math.min(84, n[index] + d)); panel.pickNotes = n; panel.playMidis([n[index]]) }
+                  onPlay: panel.playMidis([panel.pickNotes[index]])
+                }
+              }
+              RowLayout {
+                Layout.fillWidth: true
+                Chip { text: "▶ Play all four"; onClicked: panel.playMidis(panel.pickNotes) }
+                Item { Layout.fillWidth: true }
+                Chip {
+                  text: panel.s.passNotesSet ? "Replace pass-notes" : "Save pass-notes"
+                  selected: true
+                  onClicked: { panel.s.setPassNotes(panel.pickNotes); passNotesSaved.visible = true }
+                }
+              }
+              Hint { id: passNotesSaved; visible: false; text: "Saved. Sing them on the lock exactly like this, in this order." }
+              RowLayout {
+                Layout.fillWidth: true
+                Label { text: "Pass-notes difficulty"; Layout.fillWidth: true }
+                Repeater {
+                  model: [{ value: "normal", label: "Normal" }, { value: "hard", label: "Hard" }]
+                  Chip {
+                    required property var modelData
+                    small: true
+                    text: modelData.label
+                    selected: (panel.s.passNotesDifficulty || "normal") === modelData.value
+                    onClicked: panel.s.passNotesDifficulty = modelData.value
+                  }
+                }
+              }
+              Hint { text: (panel.s.passNotesDifficulty === "hard" ? "Hard: within ±15¢, held 0.75 s each." : "Normal: within ±26.9¢, held 0.5 s each.") + " Pass-notes only use Normal or Hard; the challenge settings don't change them." }
+
+              PanelSeparator { Layout.fillWidth: true; foreground: panel.fg }
+
+              RowLayout {
+                Layout.fillWidth: true
+                Label { text: "Pass-code (typed)"; font.bold: true; Layout.fillWidth: true }
+                Label { text: panel.s.passCodeSet ? "set ✓" : "none"; color: panel.s.passCodeSet ? panel.accent : panel.dim; font.bold: true }
+              }
+              Hint { text: "Typed anywhere on the lock, no Enter: it unlocks the moment the last letters you typed are your pass-code. Not your account password — pick something separate, at least 4 characters." }
+              TextField { id: codeField; Layout.fillWidth: true; password: true; echoMode: TextInput.Password; placeholderText: "new pass-code" }
+              TextField { id: codeConfirm; Layout.fillWidth: true; password: true; echoMode: TextInput.Password; placeholderText: "type it again" }
+              RowLayout {
+                Layout.fillWidth: true
+                Text {
+                  id: codeMsg
+                  Layout.fillWidth: true
+                  wrapMode: Text.WordWrap
+                  color: Color.urgent
+                  font.family: panel.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+                Chip { visible: panel.s.passCodeSet; small: true; text: "Remove"; onClicked: { panel.s.setPassCode(""); codeMsg.text = "" } }
+                Chip {
+                  text: panel.s.passCodeSet ? "Replace pass-code" : "Save pass-code"
+                  selected: true
+                  onClicked: {
+                    if (codeField.text.length < 4) { codeMsg.color = Color.urgent; codeMsg.text = "At least 4 characters."; return }
+                    if (codeField.text !== codeConfirm.text) { codeMsg.color = Color.urgent; codeMsg.text = "The two don't match."; return }
+                    panel.s.setPassCode(codeField.text)
+                    codeField.text = ""; codeConfirm.text = ""
+                    codeMsg.color = panel.accent; codeMsg.text = "Saved."
+                  }
+                }
+              }
+            }
+
+            // Bypass word (fun mode only)
+            FieldLabel {
+              visible: panel.s.unlockMode === "fun"
+              title: "Bypass word"
+              hint: "typing it anywhere on the lock unlocks it; leave blank to turn it off"
+            }
+            TextField {
+              visible: panel.s.unlockMode === "fun"
+              Layout.fillWidth: true
+              password: true
+              echoMode: TextInput.Password
+              placeholderText: "none — only singing or your password"
+              text: panel.s.bypassWord
+              onEditingFinished: panel.s.bypassWord = text.trim().toLowerCase()
+            }
+            SettingToggle {
+              label: "Show time and accuracy on unlock"
+              checked: panel.s.showStats
+              onClicked: panel.s.showStats = !panel.s.showStats
+            }
+            Row {
+              Knob {
+                title: "Unlock screen"
+                valueText: panel.s.unlockPauseSeconds.toFixed(1) + " s"
+                from: 0.5; to: 6; step: 0.5
+                value: panel.s.unlockPauseSeconds
+                onChanged: v => panel.s.unlockPauseSeconds = v
+              }
+            }
+          }
         }
-        Item { Layout.fillWidth: true }
-        Button {
-          text: "Restore defaults"
-          bordered: true
-          foreground: panel.fg
-          tooltipText: "Back to the original bass tuning (keeps your bypass word)"
-          onClicked: panel.s.resetToDefaults()
+
+        // ════ right column: challenge, sound, microphone, scores ════
+        ColumnLayout {
+          Layout.fillWidth: true
+          Layout.preferredWidth: 1
+          Layout.alignment: Qt.AlignTop
+          spacing: Style.space(14)
+
+          Card {
+            Section { text: "CHALLENGE" }
+            Flow {
+              Layout.fillWidth: true
+              spacing: Style.space(6)
+              Repeater {
+                model: panel.s.difficulties
+                Chip {
+                  required property var modelData
+                  visible: modelData.value !== "custom" || panel.s.difficulty === "custom"
+                  text: modelData.label
+                  selected: panel.s.difficulty === modelData.value
+                  onClicked: panel.s.applyDifficulty(modelData.value)
+                }
+              }
+            }
+            Row {
+              spacing: Style.space(4)
+              Knob {
+                title: "Accuracy"
+                valueText: "±" + panel.s.tolerance.toFixed(0) + "¢"
+                from: 10; to: 50; step: 0.5
+                value: panel.s.tolerance
+                onChanged: v => panel.s.setTuning("tolerance", v)
+              }
+              Knob {
+                title: "Hold"
+                valueText: panel.s.holdSeconds.toFixed(2) + " s"
+                from: 0.2; to: 1.5; step: 0.05
+                value: panel.s.holdSeconds
+                onChanged: v => panel.s.setTuning("holdSeconds", v)
+              }
+              Knob {
+                title: "Colour chords"
+                valueText: Math.round(panel.s.colourChordChance * 100) + "%"
+                from: 0; to: 1; step: 0.05
+                value: panel.s.colourChordChance
+                onChanged: v => panel.s.setTuning("colourChordChance", v)
+              }
+            }
+            Hint { text: "Accuracy: how close to the note counts (100¢ = a semitone). Hold: how long each note must stay in tune. Colour chords: how often diminished, augmented and sus4 chords come up. Drag a dial up or down." }
+            FieldLabel { title: "Chord types" }
+            Flow {
+              Layout.fillWidth: true
+              spacing: Style.space(6)
+              Repeater {
+                model: panel.s.chordTypes
+                Chip {
+                  required property var modelData
+                  text: modelData.label
+                  selected: panel.s.chordTypeOn(modelData.value)
+                  onClicked: panel.s.setChordType(modelData.value, !panel.s.chordTypeOn(modelData.value))
+                }
+              }
+            }
+            Hint { text: "Every chord has four notes (a 7th chord), voiced in whichever inversion fits your range." }
+            SettingToggle {
+              label: "Random note order"
+              description: "Sing the chord's notes in a shuffled order instead of always root first."
+              checked: panel.s.randomOrder
+              onClicked: panel.s.randomOrder = !panel.s.randomOrder
+            }
+          }
+
+          Card {
+            Section { text: "SOUND" }
+            Hint { text: "Space always plays the note to sing. Nothing else plays unless switched on here." }
+            SettingToggle {
+              label: "Play the first note when a chord appears"
+              description: "Including the moment the screen locks — turn off for quiet places."
+              checked: panel.s.playFirstNote
+              onClicked: panel.s.playFirstNote = !panel.s.playFirstNote
+            }
+            SettingToggle {
+              label: "Play the next note after a match"
+              checked: panel.s.playNextNote
+              onClicked: panel.s.playNextNote = !panel.s.playNextNote
+            }
+            SettingToggle {
+              label: "Pause music while locked"
+              description: "Any player that's playing (Spotify, a browser, Matrix Rain's music) pauses when the lock appears and carries on when you unlock."
+              checked: panel.s.pauseMusic
+              onClicked: panel.s.pauseMusic = !panel.s.pauseMusic
+            }
+            SettingToggle {
+              label: "Play the chord on unlock"
+              checked: panel.s.unlockChord
+              onClicked: panel.s.unlockChord = !panel.s.unlockChord
+            }
+            Row {
+              Knob {
+                title: "Volume"
+                valueText: Math.round(panel.s.toneVolume * 100) + "%"
+                from: 0.1; to: 1.5; step: 0.05
+                value: panel.s.toneVolume
+                onChanged: v => panel.s.toneVolume = v
+              }
+            }
+          }
+
+          Card {
+            Section { text: "MICROPHONE" }
+            SettingToggle {
+              label: "Test microphone"
+              description: "Sing a note: it should show up below. If it doesn't, lower noise rejection."
+              checked: panel.micTestOn
+              onClicked: panel.micTestOn = !panel.micTestOn
+            }
+            RowLayout {
+              visible: panel.micTestOn
+              Layout.fillWidth: true
+              spacing: Style.space(10)
+              Rectangle {
+                Layout.fillWidth: true
+                implicitHeight: Style.space(8)
+                radius: height / 2
+                color: panel.tint(0.12)
+                Rectangle {
+                  width: parent.width * panel.micLevel
+                  height: parent.height
+                  radius: parent.radius
+                  color: panel.micHeard ? panel.accent : panel.dim
+                }
+              }
+              Label {
+                Layout.preferredWidth: Style.space(160)
+                horizontalAlignment: Text.AlignRight
+                text: panel.micHeard
+                  ? panel.noteName(panel.micMidi) + "  " + (440 * Math.pow(2, (panel.micMidi - 69) / 12)).toFixed(1) + " Hz"
+                  : "not hearing a note"
+                color: panel.micHeard ? panel.accent : panel.dim
+              }
+            }
+            Row {
+              spacing: Style.space(4)
+              Knob {
+                title: "Noise rejection"
+                valueText: panel.s.micSensitivity.toFixed(1) + "×"
+                from: 1.5; to: 8; step: 0.5
+                value: panel.s.micSensitivity
+                onChanged: v => panel.s.micSensitivity = v
+              }
+              Knob {
+                title: "Mic sleeps"
+                valueText: Math.round(panel.s.micSleepSeconds) + " s"
+                from: 15; to: 300; step: 5
+                value: panel.s.micSleepSeconds
+                onChanged: v => panel.s.micSleepSeconds = v
+              }
+            }
+            Hint { text: "Noise rejection: how much louder than the room your voice must be — lower hears quiet voices, higher ignores more noise (turn the mic test off and on to try a new value). Mic sleeps: after this long without sound on the lock." }
+          }
+
+          Card {
+            Section { text: "SCORES" }
+            Hint { text: "Typical unlock time for each voice type and difficulty (your last 10 there, leaving out unusually slow ones), with the best underneath. Yours right now is outlined." }
+            GridLayout {
+              id: scoreGrid
+              Layout.fillWidth: true
+              columns: panel.s.difficulties.length + 1
+              columnSpacing: Style.space(4)
+              rowSpacing: Style.space(4)
+              readonly property var cells: {
+                const out = [{ kind: "corner" }]
+                for (const d of panel.s.difficulties) out.push({ kind: "head", text: d.label === "Perfect pitch" ? "Perfect" : d.label })
+                for (const v of panel.s.presets) {
+                  out.push({ kind: "voice", text: v.value === "mezzo" ? "Mezzo" : v.value === "all" ? "All" : v.label })
+                  for (const d of panel.s.difficulties) {
+                    const list = Stats.forCombo(pitchState.unlocks, d.value, v.value)
+                    const t = Stats.typical(list.slice(-10))
+                    out.push({ kind: "score", count: list.length, typical: t.secs, best: Stats.best(list),
+                               current: panel.s.voice === v.value && panel.s.difficulty === d.value })
+                  }
+                }
+                return out
+              }
+              Repeater {
+                model: scoreGrid.cells
+                Rectangle {
+                  required property var modelData
+                  Layout.fillWidth: true
+                  Layout.preferredWidth: modelData.kind === "voice" || modelData.kind === "corner" ? Style.space(70) : Style.space(56)
+                  implicitHeight: modelData.kind === "score" ? Style.space(34) : Style.space(20)
+                  radius: 4
+                  color: modelData.kind !== "score" ? "transparent"
+                    : modelData.count ? Qt.rgba(panel.accent.r, panel.accent.g, panel.accent.b, 0.16) : panel.tint(0.04)
+                  border.width: modelData.kind === "score" && modelData.current ? 2 : 0
+                  border.color: panel.accent
+                  Column {
+                    anchors.centerIn: parent
+                    Label {
+                      anchors.horizontalCenter: parent.horizontalCenter
+                      text: modelData.kind === "score" ? (modelData.count ? modelData.typical.toFixed(1) + " s" : "·") : (modelData.text || "")
+                      color: modelData.kind === "head" || modelData.kind === "voice" ? panel.dim : panel.fg
+                      font.pixelSize: Style.font.caption
+                      font.bold: modelData.kind !== "voice"
+                    }
+                    Label {
+                      anchors.horizontalCenter: parent.horizontalCenter
+                      visible: modelData.kind === "score" && modelData.count > 0
+                      text: visible ? "best " + modelData.best.toFixed(1) : ""
+                      color: panel.dim
+                      font.pixelSize: Math.round(Style.font.caption * 0.85)
+                    }
+                  }
+                }
+              }
+            }
+            Hint {
+              readonly property int untagged: (pitchState.unlocks || []).filter(u => !u.difficulty).length
+              visible: untagged > 0
+              text: untagged + " earlier unlock" + (untagged > 1 ? "s were" : " was") + " recorded before scores were split by difficulty and voice, so " + (untagged > 1 ? "they aren't" : "it isn't") + " shown here."
+            }
+            RowLayout {
+              Layout.fillWidth: true
+              Chip {
+                small: true
+                text: "Reset scores"
+                enabled: (pitchState.unlocks || []).length > 0
+                onClicked: pitchState.unlocks = []
+              }
+              Item { Layout.fillWidth: true }
+              Chip {
+                small: true
+                text: "Restore defaults"
+                onClicked: panel.s.resetToDefaults()
+              }
+            }
+          }
         }
       }
     }
